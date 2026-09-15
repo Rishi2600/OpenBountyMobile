@@ -1,12 +1,12 @@
 import * as anchor from "@anchor-lang/core";
 import { Program } from "@anchor-lang/core";
-import { Openbountymobile } from "../target/types/openbountymobile";
+import { Openbounty } from "../target/types/openbounty";
 
-describe("openbountymobile", () => {
+describe("openbounty", () => {
   // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
 
-  const program = anchor.workspace.openbountymobile as Program<Openbountymobile>;
+  const program = anchor.workspace.openbounty as Program<Openbounty>;
 
   it("Initializes and increments a counter", async () => {
     const [counter] = anchor.web3.PublicKey.findProgramAddressSync(

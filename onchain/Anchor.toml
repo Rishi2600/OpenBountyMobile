@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-openbountymobile = "LhKsxiXL5kKQrvPN15bs5zmCynnppjk5U8pmXyakmz8"
+openbounty = "3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM"
 
 [provider]
 cluster = "localnet"

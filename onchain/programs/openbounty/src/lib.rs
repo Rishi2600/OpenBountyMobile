@@ -9,10 +9,10 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("LhKsxiXL5kKQrvPN15bs5zmCynnppjk5U8pmXyakmz8");
+declare_id!("3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM");
 
 #[program]
-pub mod openbountymobile {
+pub mod openbounty {
     use super::*;
 
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
