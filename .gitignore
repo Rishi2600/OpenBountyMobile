@@ -1,0 +1,50 @@
+# ---------- onchain (Anchor / Rust) ----------
+onchain/target/
+onchain/.anchor/
+onchain/node_modules/
+onchain/test-ledger/
+onchain/.yarn/
+**/*.rs.bk
+
+# ---------- offchain (Flutter / Dart) ----------
+offchain/build/
+offchain/.dart_tool/
+offchain/.packages
+offchain/.flutter-plugins
+offchain/.flutter-plugins-dependencies
+offchain/*.iml
+offchain/.pub-cache/
+offchain/.pub/
+
+# Android
+offchain/android/.gradle/
+offchain/android/captures/
+offchain/android/local.properties
+offchain/android/key.properties
+offchain/android/app/*.jks
+offchain/android/app/*.keystore
+
+# iOS
+offchain/ios/Pods/
+offchain/ios/.symlinks/
+offchain/ios/Flutter/Flutter.framework
+offchain/ios/Flutter/Flutter.podspec
+offchain/ios/Flutter/Generated.xcconfig
+offchain/ios/Flutter/flutter_export_environment.sh
+offchain/ios/Runner/GeneratedPluginRegistrant.*
+
+# ---------- secrets / keys ----------
+.env
+**/.env
+**/.env.*
+!**/.env.example
+**/id.json
+**/*-keypair.json
+**/*.keypair.json
+
+# ---------- editor / OS ----------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
