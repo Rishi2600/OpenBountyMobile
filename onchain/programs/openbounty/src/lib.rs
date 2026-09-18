@@ -2,6 +2,7 @@ pub mod constants;
 pub mod error;
 pub mod instructions;
 pub mod state;
+pub mod vault;
 
 use anchor_lang::prelude::*;
 
@@ -44,5 +45,9 @@ pub mod openbounty {
         candidate: Pubkey,
     ) -> Result<()> {
         instructions::vote::handle_vote_winner(ctx, nonce, tier, candidate)
+    }
+
+    pub fn claim_prize(ctx: Context<ClaimPrize>, nonce: u8, tier: u8) -> Result<()> {
+        instructions::claim::handle_claim_prize(ctx, nonce, tier)
     }
 }
