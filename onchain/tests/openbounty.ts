@@ -622,14 +622,16 @@ describe("claim_prize", () => {
   const outsider = web3.Keypair.generate();
 
   before(async () => {
-    await fund(organizer.publicKey, 2 * web3.LAMPORTS_PER_SOL);
+    // Five bounties at about 0.415 SOL each (prize, both rents, fee).
+    await fund(organizer.publicKey, 3 * web3.LAMPORTS_PER_SOL);
     await fund(judge.publicKey, FEE_LAMPORTS);
     await fund(winner.publicKey, FEE_LAMPORTS);
     await fund(outsider.publicKey, FEE_LAMPORTS);
   });
 
-  // Every bounty here has two tiers and at most one of them is claimed, so no
-  // test in this block reaches the final claim that closes the accounts.
+  // Every bounty here has two tiers. Only the last test claims both; the
+  // others claim at most one, so they never reach the final claim that closes
+  // the accounts.
   async function createTwoTierBounty(nonce: number) {
     return createBounty(organizer, {
       judges: [judge.publicKey],
@@ -707,5 +709,35 @@ describe("claim_prize", () => {
     const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
     expect(tier.winner).to.equal(null);
     expect(tier.claimed).to.equal(false);
+  });
+
+  it("closes both accounts on the final claim and refunds their rent to the organizer", async () => {
+    const nonce = 4;
+    const { escrow, vault } = await createTwoTierBounty(nonce);
+    await castVote(judge, escrow, nonce, 0, winner.publicKey);
+    await castVote(judge, escrow, nonce, 1, winner.publicKey);
+    await claimPrize(winner, organizer.publicKey, nonce, 0);
+
+    // Before the final claim the vault holds tier 1's prize and its own rent.
+    const vaultRent = await connection.getMinimumBalanceForRentExemption(0);
+    expect(await connection.getBalance(vault)).to.equal(
+      100_000_000 + vaultRent
+    );
+    const escrowRent = await connection.getBalance(escrow);
+    const organizerBefore = await connection.getBalance(organizer.publicKey);
+    const winnerBefore = await connection.getBalance(winner.publicKey);
+
+    const signature = await claimPrize(winner, organizer.publicKey, nonce, 1);
+
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+
+    // The winner gets tier 1's prize minus their fee. The organizer signed
+    // nothing, and receives exactly the rent that kept both accounts alive.
+    const fee = await txFee(signature);
+    const winnerAfter = await connection.getBalance(winner.publicKey);
+    expect(winnerAfter - winnerBefore).to.equal(100_000_000 - fee);
+    const organizerAfter = await connection.getBalance(organizer.publicKey);
+    expect(organizerAfter - organizerBefore).to.equal(escrowRent + vaultRent);
   });
 });

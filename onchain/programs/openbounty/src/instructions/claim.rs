@@ -65,5 +65,29 @@ pub fn handle_claim_prize(ctx: Context<ClaimPrize>, nonce: u8, tier: u8) -> Resu
         amount,
     )?;
 
+    // Anchor's `close` constraint would close on every claim, but the accounts
+    // may only close once every tier is paid out, so the close is done here by
+    // hand. Nothing is left to refund at that point.
+    if ctx.accounts.escrow.all_tiers_claimed() {
+        // What remains in the vault is its rent-exempt minimum plus any
+        // lamports someone sent it directly. Moving all of it leaves the vault
+        // at zero, and the runtime removes it at the end of the transaction.
+        let remaining = ctx.accounts.vault.lamports();
+        transfer_from_vault(
+            &ctx.accounts.vault,
+            ctx.accounts.organizer.to_account_info(),
+            organizer,
+            nonce,
+            vault_bump,
+            remaining,
+        )?;
+
+        // Done last: this moves the escrow's rent to the organizer and wipes
+        // its data, so the escrow must not be read or written after this.
+        ctx.accounts
+            .escrow
+            .close(ctx.accounts.organizer.to_account_info())?;
+    }
+
     Ok(())
 }
