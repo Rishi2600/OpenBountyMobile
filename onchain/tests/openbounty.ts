@@ -196,6 +196,27 @@ async function castVote(
     .rpc();
 }
 
+// Claims one tier, signed and paid for by `winner`. The escrow and vault are
+// derived from the organizer's key and the nonce.
+async function claimPrize(
+  winner: web3.Keypair,
+  organizer: web3.PublicKey,
+  nonce: number,
+  tier: number
+) {
+  const [escrow] = escrowPda(organizer, nonce);
+  const [vault] = vaultPda(organizer, nonce);
+  return programFor(winner)
+    .methods.claimPrize(nonce, tier)
+    .accountsPartial({
+      escrow,
+      vault,
+      winner: winner.publicKey,
+      organizer,
+    })
+    .rpc();
+}
+
 // ---------------------------------------------------------------------------
 // initialize_escrow
 // ---------------------------------------------------------------------------
@@ -587,5 +608,104 @@ describe("vote_winner", () => {
     const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
     expect(tier.votes.length).to.equal(0);
     expect(tier.winner).to.equal(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// claim_prize
+// ---------------------------------------------------------------------------
+
+describe("claim_prize", () => {
+  const organizer = web3.Keypair.generate();
+  const judge = web3.Keypair.generate();
+  const winner = web3.Keypair.generate();
+  const outsider = web3.Keypair.generate();
+
+  before(async () => {
+    await fund(organizer.publicKey, 2 * web3.LAMPORTS_PER_SOL);
+    await fund(judge.publicKey, FEE_LAMPORTS);
+    await fund(winner.publicKey, FEE_LAMPORTS);
+    await fund(outsider.publicKey, FEE_LAMPORTS);
+  });
+
+  // Every bounty here has two tiers and at most one of them is claimed, so no
+  // test in this block reaches the final claim that closes the accounts.
+  async function createTwoTierBounty(nonce: number) {
+    return createBounty(organizer, {
+      judges: [judge.publicKey],
+      threshold: 1,
+      tierAmounts: [300_000_000, 100_000_000],
+      nonce,
+    });
+  }
+
+  it("pays the winner and marks the tier claimed", async () => {
+    const nonce = 0;
+    const { escrow, vault } = await createTwoTierBounty(nonce);
+    await castVote(judge, escrow, nonce, 0, winner.publicKey);
+
+    const winnerBefore = await connection.getBalance(winner.publicKey);
+    const vaultBefore = await connection.getBalance(vault);
+
+    const signature = await claimPrize(winner, organizer.publicKey, nonce, 0);
+
+    // The winner receives the full tier amount and pays only their own fee.
+    const fee = await txFee(signature);
+    const winnerAfter = await connection.getBalance(winner.publicKey);
+    expect(winnerAfter - winnerBefore).to.equal(300_000_000 - fee);
+    expect(await connection.getBalance(vault)).to.equal(
+      vaultBefore - 300_000_000
+    );
+
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].claimed).to.equal(true);
+    expect(account.tiers[1].claimed).to.equal(false);
+  });
+
+  it("rejects a claim from someone who is not the winner", async () => {
+    const nonce = 1;
+    const { escrow, vault } = await createTwoTierBounty(nonce);
+    await castVote(judge, escrow, nonce, 0, winner.publicKey);
+    const vaultBefore = await connection.getBalance(vault);
+
+    await expectError(
+      claimPrize(outsider, organizer.publicKey, nonce, 0),
+      "NotWinner"
+    );
+
+    expect(await connection.getBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("rejects a second claim of the same tier", async () => {
+    const nonce = 2;
+    const { escrow, vault } = await createTwoTierBounty(nonce);
+    await castVote(judge, escrow, nonce, 0, winner.publicKey);
+    await claimPrize(winner, organizer.publicKey, nonce, 0);
+    const vaultAfterFirstClaim = await connection.getBalance(vault);
+
+    await expectError(
+      claimPrize(winner, organizer.publicKey, nonce, 0),
+      "TierAlreadyClaimed"
+    );
+
+    expect(await connection.getBalance(vault)).to.equal(vaultAfterFirstClaim);
+  });
+
+  it("rejects a claim before the tier has a winner", async () => {
+    const nonce = 3;
+    const { escrow, vault } = await createTwoTierBounty(nonce);
+    const vaultBefore = await connection.getBalance(vault);
+
+    await expectError(
+      claimPrize(winner, organizer.publicKey, nonce, 0),
+      "TierNotFinalized"
+    );
+
+    expect(await connection.getBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.winner).to.equal(null);
+    expect(tier.claimed).to.equal(false);
   });
 });
