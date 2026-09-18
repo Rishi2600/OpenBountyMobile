@@ -23,6 +23,11 @@ const CONFIRM: web3.ConfirmOptions = {
 
 const ONE_HOUR = 60 * 60;
 
+// Funding for wallets that only sign and pay fees, such as judges. It covers
+// the rent-exempt minimum a wallet must keep (about 0.0009 SOL) plus fees,
+// and is far smaller than any prize used in these tests.
+const FEE_LAMPORTS = 5_000_000;
+
 // Moves SOL from the provider wallet to a test wallet. Tests never rely on
 // airdrops.
 async function fund(to: web3.PublicKey, lamports: number) {
@@ -175,6 +180,20 @@ async function createBounty(organizer: web3.Keypair, options: BountyOptions) {
     .rpc();
 
   return { escrow, vault, signature };
+}
+
+// Casts one vote, signed and paid for by the judge.
+async function castVote(
+  judge: web3.Keypair,
+  escrow: web3.PublicKey,
+  nonce: number,
+  tier: number,
+  candidate: web3.PublicKey
+) {
+  return programFor(judge)
+    .methods.voteWinner(nonce, tier, candidate)
+    .accountsPartial({ escrow, judge: judge.publicKey })
+    .rpc();
 }
 
 // ---------------------------------------------------------------------------
@@ -346,5 +365,127 @@ describe("initialize_escrow", () => {
       { judges, tierAmounts: [100_000_000, 0] },
       "InvalidAmount"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// vote_winner
+// ---------------------------------------------------------------------------
+
+describe("vote_winner", () => {
+  const organizer = web3.Keypair.generate();
+  const judges = [
+    web3.Keypair.generate(),
+    web3.Keypair.generate(),
+    web3.Keypair.generate(),
+  ];
+  const judgeKeys = [
+    judges[0].publicKey,
+    judges[1].publicKey,
+    judges[2].publicKey,
+  ];
+
+  // Candidates only receive votes, so they never need funding.
+  const candidateA = web3.Keypair.generate().publicKey;
+  const candidateB = web3.Keypair.generate().publicKey;
+  const candidateC = web3.Keypair.generate().publicKey;
+
+  before(async () => {
+    await fund(organizer.publicKey, web3.LAMPORTS_PER_SOL);
+    for (const judge of judges) {
+      await fund(judge.publicKey, FEE_LAMPORTS);
+    }
+  });
+
+  it("records a single vote without choosing a winner", async () => {
+    const nonce = 0;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      threshold: 2,
+      nonce,
+    });
+
+    await castVote(judges[0], escrow, nonce, 0, candidateA);
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(1);
+    expect(tier.votes[0].judge.toBase58()).to.equal(
+      judges[0].publicKey.toBase58()
+    );
+    expect(tier.votes[0].candidate.toBase58()).to.equal(candidateA.toBase58());
+    expect(tier.winner).to.equal(null);
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("finalizes the tier when a candidate reaches the threshold", async () => {
+    const nonce = 1;
+    const { escrow, vault } = await createBounty(organizer, {
+      judges: judgeKeys,
+      threshold: 2,
+      nonce,
+    });
+    const vaultBefore = await connection.getBalance(vault);
+
+    await castVote(judges[0], escrow, nonce, 0, candidateA);
+    let tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.winner).to.equal(null);
+
+    await castVote(judges[1], escrow, nonce, 0, candidateA);
+    tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(2);
+    expect(tier.winner?.toBase58()).to.equal(candidateA.toBase58());
+    expect(tier.claimed).to.equal(false);
+
+    // Finalizing only records the winner. The prize stays in the vault until
+    // the winner claims it.
+    expect(await connection.getBalance(vault)).to.equal(vaultBefore);
+  });
+
+  it("leaves the tier open when the votes are split", async () => {
+    const nonce = 2;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      threshold: 2,
+      nonce,
+    });
+
+    await castVote(judges[0], escrow, nonce, 0, candidateA);
+    await castVote(judges[1], escrow, nonce, 0, candidateB);
+    await castVote(judges[2], escrow, nonce, 0, candidateC);
+
+    // Every judge has voted and no candidate has two votes, so the tier can
+    // never finalize.
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(3);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("finalizes two tiers independently", async () => {
+    const nonce = 3;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      threshold: 2,
+      tierAmounts: [300_000_000, 100_000_000],
+      nonce,
+    });
+
+    await castVote(judges[0], escrow, nonce, 0, candidateA);
+    await castVote(judges[1], escrow, nonce, 0, candidateA);
+
+    // Tier 0 is decided, and tier 1 has not been touched.
+    let account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].winner?.toBase58()).to.equal(candidateA.toBase58());
+    expect(account.tiers[1].winner).to.equal(null);
+    expect(account.tiers[1].votes.length).to.equal(0);
+
+    // Judge 0 already voted on tier 0, and may still vote on tier 1.
+    await castVote(judges[0], escrow, nonce, 1, candidateB);
+    await castVote(judges[2], escrow, nonce, 1, candidateB);
+
+    account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].winner?.toBase58()).to.equal(candidateA.toBase58());
+    expect(account.tiers[0].votes.length).to.equal(2);
+    expect(account.tiers[1].winner?.toBase58()).to.equal(candidateB.toBase58());
+    expect(account.tiers[1].votes.length).to.equal(2);
   });
 });
