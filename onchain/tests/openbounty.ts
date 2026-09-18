@@ -99,15 +99,20 @@ async function waitUntilAfter(timestamp: number) {
   throw new Error("On-chain clock never passed " + timestamp);
 }
 
+// A public RPC node (such as devnet's) can take a moment to serve a
+// transaction it has just confirmed, so this retries briefly before failing.
 async function txFee(signature: string): Promise<number> {
-  const tx = await connection.getTransaction(signature, {
-    commitment: "confirmed",
-    maxSupportedTransactionVersion: 0,
-  });
-  if (tx === null || tx.meta === null) {
-    throw new Error("Transaction not found: " + signature);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const tx = await connection.getTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (tx !== null && tx.meta !== null) {
+      return tx.meta.fee;
+    }
+    await sleep(500);
   }
-  return tx.meta.fee;
+  throw new Error("Transaction not found: " + signature);
 }
 
 // Asserts that `action` fails with the named program error, for example
@@ -931,5 +936,96 @@ describe("refund_unclaimed", () => {
     const refundedPrizes =
       organizerAfter - organizerBefore + fee - vaultRent - escrowRent;
     expect(refundedPrizes).to.equal(100_000_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// devnet smoke
+// ---------------------------------------------------------------------------
+
+// One full lifecycle against a real cluster: create, vote to finalize, claim.
+// It runs with the local suite, and on its own against devnet with:
+//
+//   ANCHOR_PROVIDER_URL=https://api.devnet.solana.com \
+//   ANCHOR_WALLET=$HOME/.config/solana/id.json \
+//   yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/openbounty.ts \
+//     --grep "devnet smoke"
+//
+// It uses a small prize to save devnet SOL, and reads at "confirmed" so a
+// public RPC node that lags slightly behind cannot fail it.
+describe("devnet smoke", () => {
+  const organizer = web3.Keypair.generate();
+  const judges = [web3.Keypair.generate(), web3.Keypair.generate()];
+  const winner = web3.Keypair.generate();
+
+  // 0.05 SOL
+  const PRIZE = 50_000_000;
+
+  before(async () => {
+    // The prize, both accounts' rent (about 0.015 SOL), and fees.
+    await fund(organizer.publicKey, 100_000_000);
+    for (const judge of judges) {
+      await fund(judge.publicKey, FEE_LAMPORTS);
+    }
+    await fund(winner.publicKey, FEE_LAMPORTS);
+  });
+
+  it("creates a bounty, finalizes a tier by vote, and pays the winner", async () => {
+    const nonce = 0;
+    const created = await createBounty(organizer, {
+      title: "OpenBounty Smoke Test",
+      judges: [judges[0].publicKey, judges[1].publicKey],
+      threshold: 2,
+      tierAmounts: [PRIZE],
+      nonce,
+    });
+    const escrow = created.escrow;
+    const vault = created.vault;
+
+    const firstVote = await castVote(
+      judges[0],
+      escrow,
+      nonce,
+      0,
+      winner.publicKey
+    );
+    const secondVote = await castVote(
+      judges[1],
+      escrow,
+      nonce,
+      0,
+      winner.publicKey
+    );
+
+    const account = await program.account.escrow.fetch(escrow, "confirmed");
+    expect(account.tiers[0].winner?.toBase58()).to.equal(
+      winner.publicKey.toBase58()
+    );
+
+    const winnerBefore = await connection.getBalance(
+      winner.publicKey,
+      "confirmed"
+    );
+    const claim = await claimPrize(winner, organizer.publicKey, nonce, 0);
+
+    // The winner is paid the prize, and because this was the only tier the
+    // claim also closed both accounts.
+    const fee = await txFee(claim);
+    const winnerAfter = await connection.getBalance(
+      winner.publicKey,
+      "confirmed"
+    );
+    expect(winnerAfter - winnerBefore).to.equal(PRIZE - fee);
+    expect(await connection.getAccountInfo(escrow, "confirmed")).to.equal(null);
+    expect(await connection.getAccountInfo(vault, "confirmed")).to.equal(null);
+
+    console.log("      organizer:     " + organizer.publicKey.toBase58());
+    console.log("      escrow:        " + escrow.toBase58());
+    console.log("      vault:         " + vault.toBase58());
+    console.log("      winner:        " + winner.publicKey.toBase58());
+    console.log("      create bounty: " + created.signature);
+    console.log("      first vote:    " + firstVote);
+    console.log("      second vote:   " + secondVote);
+    console.log("      claim prize:   " + claim);
   });
 });
