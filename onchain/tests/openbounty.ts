@@ -390,11 +390,15 @@ describe("vote_winner", () => {
   const candidateB = web3.Keypair.generate().publicKey;
   const candidateC = web3.Keypair.generate().publicKey;
 
+  // A wallet that is not on any judge list.
+  const outsider = web3.Keypair.generate();
+
   before(async () => {
-    await fund(organizer.publicKey, web3.LAMPORTS_PER_SOL);
+    await fund(organizer.publicKey, 2 * web3.LAMPORTS_PER_SOL);
     for (const judge of judges) {
       await fund(judge.publicKey, FEE_LAMPORTS);
     }
+    await fund(outsider.publicKey, FEE_LAMPORTS);
   });
 
   it("records a single vote without choosing a winner", async () => {
@@ -487,5 +491,101 @@ describe("vote_winner", () => {
     expect(account.tiers[0].votes.length).to.equal(2);
     expect(account.tiers[1].winner?.toBase58()).to.equal(candidateB.toBase58());
     expect(account.tiers[1].votes.length).to.equal(2);
+  });
+
+  it("rejects a vote from someone who is not a judge", async () => {
+    const nonce = 4;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      nonce,
+    });
+
+    await expectError(
+      castVote(outsider, escrow, nonce, 0, candidateA),
+      "NotAJudge"
+    );
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(0);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("rejects a second vote from the same judge on the same tier", async () => {
+    const nonce = 5;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      threshold: 2,
+      nonce,
+    });
+
+    await castVote(judges[0], escrow, nonce, 0, candidateA);
+    await expectError(
+      castVote(judges[0], escrow, nonce, 0, candidateA),
+      "AlreadyVoted"
+    );
+
+    // Only the first vote counts, so candidate A is still one vote short.
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(1);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("rejects a vote on a tier that already has a winner", async () => {
+    const nonce = 6;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      threshold: 2,
+      nonce,
+    });
+
+    await castVote(judges[0], escrow, nonce, 0, candidateA);
+    await castVote(judges[1], escrow, nonce, 0, candidateA);
+    await expectError(
+      castVote(judges[2], escrow, nonce, 0, candidateB),
+      "TierAlreadyFinalized"
+    );
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(2);
+    expect(tier.winner?.toBase58()).to.equal(candidateA.toBase58());
+  });
+
+  it("rejects a vote on a tier that does not exist", async () => {
+    const nonce = 7;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      nonce,
+    });
+
+    // The bounty has a single tier, at index 0.
+    await expectError(
+      castVote(judges[0], escrow, nonce, 1, candidateA),
+      "InvalidTierIndex"
+    );
+
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers.length).to.equal(1);
+    expect(account.tiers[0].votes.length).to.equal(0);
+  });
+
+  it("rejects a vote after the deadline", async () => {
+    const nonce = 8;
+    // Just far enough ahead for the creation transaction to land first.
+    const deadline = (await chainNow()) + 3;
+    const { escrow } = await createBounty(organizer, {
+      judges: judgeKeys,
+      deadline,
+      nonce,
+    });
+
+    await waitUntilAfter(deadline);
+    await expectError(
+      castVote(judges[0], escrow, nonce, 0, candidateA),
+      "DeadlinePassed"
+    );
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(0);
+    expect(tier.winner).to.equal(null);
   });
 });

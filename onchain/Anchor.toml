@@ -15,4 +15,10 @@ wallet = "~/.config/solana/id.json"
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
 
+# `anchor test` defaults Surfpool to "transaction" mode, where the on-chain
+# clock only moves when a transaction arrives. "clock" mode produces blocks in
+# real time, so deadline tests can wait a deadline out as they would on devnet.
+[surfpool]
+block_production_mode = "clock"
+
 [hooks]
