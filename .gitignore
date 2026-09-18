@@ -33,6 +33,9 @@ offchain/ios/Flutter/Generated.xcconfig
 offchain/ios/Flutter/flutter_export_environment.sh
 offchain/ios/Runner/GeneratedPluginRegistrant.*
 
+# ---------- handoff documents (shared directly, not repo content) ----------
+handoff/
+
 # ---------- secrets / keys ----------
 .env
 **/.env
