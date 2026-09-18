@@ -8,6 +8,11 @@ skip-lint = false
 [programs.localnet]
 openbounty = "3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM"
 
+# Deploy with `anchor deploy --provider.cluster devnet`. The provider below
+# stays on localnet so `anchor test` keeps running against local Surfpool.
+[programs.devnet]
+openbounty = "3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM"
+
 [provider]
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"
