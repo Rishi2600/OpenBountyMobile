@@ -189,9 +189,26 @@ describe("initialize_escrow", () => {
     web3.Keypair.generate().publicKey,
   ];
 
+  // Signs every failure test. The escrow account is created by Anchor before
+  // the handler runs its checks, so this wallet must cover the escrow's rent
+  // (about 0.014 SOL) and fees. It holds far less than the 0.1 SOL default
+  // prize, so a check that failed to fire would surface as a transfer error
+  // instead of the expected program error.
+  const underfundedOrganizer = web3.Keypair.generate();
+  const UNDERFUNDED_LAMPORTS = 30_000_000;
+
   before(async () => {
     await fund(organizer.publicKey, 2 * web3.LAMPORTS_PER_SOL);
+    await fund(underfundedOrganizer.publicKey, UNDERFUNDED_LAMPORTS);
   });
+
+  // None of the failure tests succeed, so the underfunded organizer's escrow
+  // at the default nonce 0 must still not exist afterwards.
+  async function expectCreateToFail(options: BountyOptions, code: string) {
+    await expectError(createBounty(underfundedOrganizer, options), code);
+    const [escrow] = escrowPda(underfundedOrganizer.publicKey, 0);
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+  }
 
   it("creates a bounty and locks the prize pool", async () => {
     // 0.5 SOL and 0.3 SOL
@@ -249,6 +266,85 @@ describe("initialize_escrow", () => {
     const organizerAfter = await connection.getBalance(organizer.publicKey);
     expect(organizerBefore - organizerAfter).to.equal(
       prizeTotal + vaultRent + escrowRent + fee
+    );
+  });
+
+  it("lets one organizer run more bounties under different nonces", async () => {
+    const first = await createBounty(organizer, {
+      judges,
+      title: "First Bounty",
+      tierAmounts: [100_000_000],
+      nonce: 1,
+    });
+    const second = await createBounty(organizer, {
+      judges,
+      title: "Second Bounty",
+      tierAmounts: [200_000_000],
+      nonce: 2,
+    });
+
+    expect(first.escrow.toBase58()).to.not.equal(second.escrow.toBase58());
+    expect(first.vault.toBase58()).to.not.equal(second.vault.toBase58());
+
+    const firstAccount = await program.account.escrow.fetch(first.escrow);
+    expect(firstAccount.title).to.equal("First Bounty");
+    expect(firstAccount.nonce).to.equal(1);
+    expect(firstAccount.tiers[0].amount.toNumber()).to.equal(100_000_000);
+
+    const secondAccount = await program.account.escrow.fetch(second.escrow);
+    expect(secondAccount.title).to.equal("Second Bounty");
+    expect(secondAccount.nonce).to.equal(2);
+    expect(secondAccount.tiers[0].amount.toNumber()).to.equal(200_000_000);
+
+    // Each vault holds only its own bounty's prize pool.
+    const vaultRent = await connection.getMinimumBalanceForRentExemption(0);
+    expect(await connection.getBalance(first.vault)).to.equal(
+      100_000_000 + vaultRent
+    );
+    expect(await connection.getBalance(second.vault)).to.equal(
+      200_000_000 + vaultRent
+    );
+  });
+
+  it("rejects an empty title", async () => {
+    await expectCreateToFail({ judges, title: "" }, "InvalidTitleLength");
+  });
+
+  it("rejects a 51-byte title", async () => {
+    await expectCreateToFail(
+      { judges, title: "a".repeat(51) },
+      "InvalidTitleLength"
+    );
+  });
+
+  it("rejects a 101-byte metadata URI", async () => {
+    await expectCreateToFail(
+      { judges, metadataUri: "a".repeat(101) },
+      "InvalidMetadataUriLength"
+    );
+  });
+
+  it("rejects a threshold above the number of judges", async () => {
+    await expectCreateToFail({ judges, threshold: 4 }, "InvalidThreshold");
+  });
+
+  it("rejects a threshold of zero", async () => {
+    await expectCreateToFail({ judges, threshold: 0 }, "InvalidThreshold");
+  });
+
+  it("rejects a deadline in the past", async () => {
+    const deadline = (await chainNow()) - 60;
+    await expectCreateToFail({ judges, deadline }, "InvalidDeadline");
+  });
+
+  it("rejects an empty judges list", async () => {
+    await expectCreateToFail({ judges: [] }, "NoJudges");
+  });
+
+  it("rejects a prize tier with a zero amount", async () => {
+    await expectCreateToFail(
+      { judges, tierAmounts: [100_000_000, 0] },
+      "InvalidAmount"
     );
   });
 });
