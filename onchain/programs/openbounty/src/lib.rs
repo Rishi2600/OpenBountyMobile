@@ -50,4 +50,8 @@ pub mod openbounty {
     pub fn claim_prize(ctx: Context<ClaimPrize>, nonce: u8, tier: u8) -> Result<()> {
         instructions::claim::handle_claim_prize(ctx, nonce, tier)
     }
+
+    pub fn refund_unclaimed(ctx: Context<RefundUnclaimed>, nonce: u8) -> Result<()> {
+        instructions::refund::handle_refund_unclaimed(ctx, nonce)
+    }
 }
