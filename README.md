@@ -90,10 +90,22 @@ anchor test
 Deploy to devnet:
 
 ```bash
-# TODO: fill in once deployed
+cd onchain
+anchor keys sync      # program ID in lib.rs and Anchor.toml must match the keypair
+anchor build
+anchor deploy --provider.cluster devnet
 ```
 
-**Deployed program ID (devnet):** `TODO`
+`Anchor.toml` keeps the provider on `localnet` so that `anchor test`
+always runs against local Surfpool; the devnet target is chosen on the
+command line. The deploy wallet (`~/.config/solana/id.json`) becomes the
+upgrade authority. A first deploy needs about 2.2 devnet SOL at its peak
+(program data rent plus a temporary upload buffer, which is refunded)
+and costs about 1.1 SOL in the end. Anchor 1.1.2 prints a warning that
+`anchor deploy` is deprecated in favour of `anchor program deploy`; the
+command above is the one that was used.
+
+**Deployed program ID (devnet):** `3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM`
 
 ## Offchain — Run the Mobile App
 
