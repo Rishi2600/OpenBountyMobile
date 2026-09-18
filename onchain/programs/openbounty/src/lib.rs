@@ -36,4 +36,13 @@ pub mod openbounty {
             nonce,
         )
     }
+
+    pub fn vote_winner(
+        ctx: Context<VoteWinner>,
+        nonce: u8,
+        tier: u8,
+        candidate: Pubkey,
+    ) -> Result<()> {
+        instructions::vote::handle_vote_winner(ctx, nonce, tier, candidate)
+    }
 }
