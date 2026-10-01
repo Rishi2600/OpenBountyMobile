@@ -51,3 +51,6 @@ handoff/
 .DS_Store
 Thumbs.db
 *.swp
+
+#CLAUDE.md
+CLAUDE.md
