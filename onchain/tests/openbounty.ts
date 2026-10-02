@@ -93,6 +93,16 @@ const MIN_CLAIM_WINDOW = 7 * 24 * 60 * 60;
 const DECIMALS = 6;
 const ONE_TOKEN = 1_000_000;
 
+// Metaplex Core, which creates the win badges. Local tests load it from
+// tests/fixtures (see [[test.genesis]] in Anchor.toml).
+const MPL_CORE_PROGRAM_ID = new web3.PublicKey(
+  "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+);
+
+// Must match BADGE_URI in the program.
+const BADGE_URI =
+  "https://raw.githubusercontent.com/Rishi2600/OpenBountyMobile/master/assets/badge.json";
+
 // The provider wallet is the authority of every test mint, so tests can mint
 // tokens to any wallet. It also pays for the mints and token accounts that the
 // helpers create.
@@ -111,15 +121,19 @@ async function fund(to: web3.PublicKey, lamports: number) {
   await provider.sendAndConfirm(tx, [], CONFIRM);
 }
 
-// A client for the program where `signer` signs and pays the fee, the same
-// way each user pays for their own transactions in the mobile app.
-function programFor(signer: web3.Keypair): Program<Openbounty> {
-  const signerProvider = new anchor.AnchorProvider(
+// A provider where `signer` signs and pays the fee, the same way each user
+// pays for their own transactions in the mobile app.
+function providerFor(signer: web3.Keypair): anchor.AnchorProvider {
+  return new anchor.AnchorProvider(
     connection,
     new anchor.Wallet(signer),
     CONFIRM
   );
-  return new Program<Openbounty>(program.idl, signerProvider);
+}
+
+// A client for the program that sends as `signer`.
+function programFor(signer: web3.Keypair): Program<Openbounty> {
+  return new Program<Openbounty>(program.idl, providerFor(signer));
 }
 
 function profilePda(organizer: web3.PublicKey): [web3.PublicKey, number] {
@@ -144,6 +158,24 @@ function escrowPda(
 function vaultPda(escrow: web3.PublicKey): [web3.PublicKey, number] {
   return web3.PublicKey.findProgramAddressSync(
     [Buffer.from("vault"), escrow.toBuffer()],
+    program.programId
+  );
+}
+
+// The tier is a single byte in the seeds.
+function badgePda(
+  escrow: web3.PublicKey,
+  tier: number
+): [web3.PublicKey, number] {
+  return web3.PublicKey.findProgramAddressSync(
+    [Buffer.from("badge"), escrow.toBuffer(), Buffer.from([tier])],
+    program.programId
+  );
+}
+
+function badgeAuthorityPda(): [web3.PublicKey, number] {
+  return web3.PublicKey.findProgramAddressSync(
+    [Buffer.from("badge_authority")],
     program.programId
   );
 }
@@ -585,16 +617,15 @@ async function sendRawInstruction(
   return connection.sendRawTransaction(tx.serialize());
 }
 
-// Claims one tier, signed and paid for by `winner`. The mint, organizer and
-// token program are read from the chain, the way a client would find them. A
-// test can pass `organizer` to name someone else as the rent recipient.
-async function claimPrize(
+// The accounts a claim needs. The mint, organizer and token program are read
+// from the chain, the way a client would find them. A test can pass
+// `organizer` to name someone else as the rent recipient.
+async function claimAccounts(
   winner: web3.Keypair,
   escrow: web3.PublicKey,
-  tier: number,
   organizer?: web3.PublicKey
 ) {
-  const account = await program.account.escrow.fetch(escrow);
+  const account = await program.account.escrow.fetch(escrow, "confirmed");
   const tokenProgram = await tokenProgramOf(account.mint);
 
   let rentRecipient = account.organizer;
@@ -610,18 +641,99 @@ async function claimPrize(
     tokenProgram
   );
 
+  return {
+    escrow,
+    vault,
+    mint: account.mint,
+    winner: winner.publicKey,
+    winnerTokenAccount,
+    organizer: rentRecipient,
+    tokenProgram,
+  };
+}
+
+// Claims one tier, signed and paid for by `winner`.
+async function claimPrize(
+  winner: web3.Keypair,
+  escrow: web3.PublicKey,
+  tier: number,
+  organizer?: web3.PublicKey
+) {
+  const accounts = await claimAccounts(winner, escrow, organizer);
   return programFor(winner)
     .methods.claimPrize(tier)
-    .accountsPartial({
-      escrow,
-      vault,
-      mint: account.mint,
-      winner: winner.publicKey,
-      winnerTokenAccount,
-      organizer: rentRecipient,
-      tokenProgram,
-    })
+    .accountsPartial(accounts)
     .rpc();
+}
+
+// The accounts minting a tier's badge needs.
+function badgeAccounts(
+  winner: web3.Keypair,
+  escrow: web3.PublicKey,
+  tier: number
+) {
+  const [badge] = badgePda(escrow, tier);
+  const [badgeAuthority] = badgeAuthorityPda();
+  return {
+    escrow,
+    winner: winner.publicKey,
+    badge,
+    badgeAuthority,
+    mplCoreProgram: MPL_CORE_PROGRAM_ID,
+  };
+}
+
+// Mints a tier's badge, signed and paid for by `winner`.
+async function mintWinBadge(
+  winner: web3.Keypair,
+  escrow: web3.PublicKey,
+  tier: number
+) {
+  return programFor(winner)
+    .methods.mintWinBadge(tier)
+    .accountsPartial(badgeAccounts(winner, escrow, tier))
+    .rpc();
+}
+
+// Mints a tier's badge and claims the tier in one transaction, the order a
+// client must use: the final claim closes the escrow, so a badge minted after
+// it would fail.
+async function mintBadgeAndClaim(
+  winner: web3.Keypair,
+  escrow: web3.PublicKey,
+  tier: number
+) {
+  const winnerProgram = programFor(winner);
+  const badgeInstruction = await winnerProgram.methods
+    .mintWinBadge(tier)
+    .accountsPartial(badgeAccounts(winner, escrow, tier))
+    .instruction();
+  const claimInstruction = await winnerProgram.methods
+    .claimPrize(tier)
+    .accountsPartial(await claimAccounts(winner, escrow))
+    .instruction();
+
+  const tx = new web3.Transaction().add(badgeInstruction, claimInstruction);
+  return providerFor(winner).sendAndConfirm(tx, [], CONFIRM);
+}
+
+// The fields of a Metaplex Core asset the tests check, read from its raw
+// bytes. Core stores them Borsh-encoded: `key` (1 means an asset), `owner`,
+// the update authority (a kind byte, 1 meaning an address, then the
+// address), then `name` and `uri` as length-prefixed strings.
+function decodeCoreAsset(data: Buffer) {
+  const nameLength = data.readUInt32LE(66);
+  const nameEnd = 70 + nameLength;
+  const uriLength = data.readUInt32LE(nameEnd);
+  const uriStart = nameEnd + 4;
+  return {
+    key: data[0],
+    owner: new web3.PublicKey(data.subarray(1, 33)),
+    updateAuthorityKind: data[33],
+    updateAuthority: new web3.PublicKey(data.subarray(34, 66)),
+    name: data.subarray(70, nameEnd).toString("utf8"),
+    uri: data.subarray(uriStart, uriStart + uriLength).toString("utf8"),
+  };
 }
 
 // Asks for a refund, signed and paid for by `signer`, who is also passed as
@@ -2161,13 +2273,190 @@ describeLocal("events", () => {
 });
 
 // ---------------------------------------------------------------------------
+// mint_win_badge
+// ---------------------------------------------------------------------------
+
+describeLocal("mint_win_badge", () => {
+  const organizer = web3.Keypair.generate();
+  const judge = web3.Keypair.generate();
+  const winner = web3.Keypair.generate();
+  const outsider = web3.Keypair.generate();
+
+  let mint: web3.PublicKey;
+
+  before(async () => {
+    await fund(organizer.publicKey, web3.LAMPORTS_PER_SOL);
+    await fund(judge.publicKey, FEE_LAMPORTS);
+    // The winner pays for every badge account it mints.
+    await fund(winner.publicKey, 50_000_000);
+    await fund(outsider.publicKey, FEE_LAMPORTS);
+
+    mint = await createTestMint(TOKEN_PROGRAM_ID);
+    await fundTokens(
+      organizer.publicKey,
+      mint,
+      TOKEN_PROGRAM_ID,
+      10_000 * ONE_TOKEN
+    );
+    // So every test can read the winner's token balance, whichever runs first.
+    await createTokenAccount(winner.publicKey, mint, TOKEN_PROGRAM_ID);
+  });
+
+  // Two tiers of 300 and 100 tokens. The judge's vote gives tier 0 to the
+  // winner; tier 1 stays undecided.
+  async function createDecidedBounty(title: string) {
+    const created = await createBounty(organizer, {
+      mint,
+      title,
+      judges: [judge.publicKey],
+      threshold: 1,
+      tierAmounts: [300 * ONE_TOKEN, 100 * ONE_TOKEN],
+    });
+    await castVote(judge, created.escrow, 0, winner.publicKey);
+    return created;
+  }
+
+  it("mints a badge to the tier's winner", async () => {
+    const { escrow } = await createDecidedBounty("Badge Bounty");
+    const [badge] = badgePda(escrow, 0);
+    expect(await connection.getAccountInfo(badge)).to.equal(null);
+    const lamportsBefore = await connection.getBalance(winner.publicKey);
+
+    const signature = await mintWinBadge(winner, escrow, 0);
+
+    const info = await connection.getAccountInfo(badge);
+    if (info === null) {
+      throw new Error("Badge account not found");
+    }
+    expect(info.owner.toBase58()).to.equal(MPL_CORE_PROGRAM_ID.toBase58());
+
+    // A Core asset owned by the winner, whose update authority is the
+    // program's badge authority, with the bounty's title and tier in its name.
+    const asset = decodeCoreAsset(info.data);
+    const [badgeAuthority] = badgeAuthorityPda();
+    expect(asset.key).to.equal(1);
+    expect(asset.owner.toBase58()).to.equal(winner.publicKey.toBase58());
+    expect(asset.updateAuthorityKind).to.equal(1);
+    expect(asset.updateAuthority.toBase58()).to.equal(
+      badgeAuthority.toBase58()
+    );
+    expect(asset.name).to.equal("OpenBounty: Badge Bounty #1");
+    expect(asset.uri).to.equal(BADGE_URI);
+
+    // The tier records the badge and is still unclaimed.
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].badgeMinted).to.equal(true);
+    expect(account.tiers[0].claimed).to.equal(false);
+    expect(account.tiers[1].badgeMinted).to.equal(false);
+
+    // The winner paid exactly what the badge account now holds, plus the fee.
+    const badgeLamports = await connection.getBalance(badge);
+    const fee = await txFee(signature);
+    const lamportsAfter = await connection.getBalance(winner.publicKey);
+    expect(lamportsBefore - lamportsAfter).to.equal(badgeLamports + fee);
+  });
+
+  it("rejects a badge for a tier that has no winner", async () => {
+    const { escrow } = await createDecidedBounty("No Winner Bounty");
+
+    // Tier 1 was never decided.
+    await expectError(mintWinBadge(winner, escrow, 1), "TierNotFinalized");
+
+    const [badge] = badgePda(escrow, 1);
+    expect(await connection.getAccountInfo(badge)).to.equal(null);
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[1].badgeMinted).to.equal(false);
+  });
+
+  it("rejects a badge from someone who is not the winner", async () => {
+    const { escrow } = await createDecidedBounty("Outsider Bounty");
+
+    await expectError(mintWinBadge(outsider, escrow, 0), "NotWinner");
+
+    const [badge] = badgePda(escrow, 0);
+    expect(await connection.getAccountInfo(badge)).to.equal(null);
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].badgeMinted).to.equal(false);
+  });
+
+  it("rejects a second badge for the same tier", async () => {
+    const { escrow } = await createDecidedBounty("Double Badge Bounty");
+    await mintWinBadge(winner, escrow, 0);
+    const [badge] = badgePda(escrow, 0);
+    const lamportsBefore = await connection.getBalance(badge);
+
+    await expectError(mintWinBadge(winner, escrow, 0), "BadgeAlreadyMinted");
+
+    // The first badge is untouched.
+    const info = await connection.getAccountInfo(badge);
+    if (info === null) {
+      throw new Error("Badge account not found");
+    }
+    expect(decodeCoreAsset(info.data).owner.toBase58()).to.equal(
+      winner.publicKey.toBase58()
+    );
+    expect(info.lamports).to.equal(lamportsBefore);
+  });
+
+  it("rejects a badge after the tier was claimed", async () => {
+    const { escrow } = await createDecidedBounty("Claimed Bounty");
+
+    // Tier 1 is still open, so this claim does not close the bounty.
+    await claimPrize(winner, escrow, 0);
+    await expectError(mintWinBadge(winner, escrow, 0), "TierAlreadyClaimed");
+
+    const [badge] = badgePda(escrow, 0);
+    expect(await connection.getAccountInfo(badge)).to.equal(null);
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].badgeMinted).to.equal(false);
+  });
+
+  it("mints the badge and makes the final claim in one transaction", async () => {
+    const { escrow, vault } = await createBounty(organizer, {
+      mint,
+      title: "Final Claim Bounty",
+      judges: [judge.publicKey],
+      tierAmounts: [100 * ONE_TOKEN],
+    });
+    await castVote(judge, escrow, 0, winner.publicKey);
+    const winnerAccount = getAssociatedTokenAddressSync(mint, winner.publicKey);
+    const tokensBefore = await tokenBalance(winnerAccount);
+
+    const signature = await mintBadgeAndClaim(winner, escrow, 0);
+
+    // The badge exists and the claim paid out and closed the bounty, all in
+    // the one transaction.
+    const [badge] = badgePda(escrow, 0);
+    const info = await connection.getAccountInfo(badge);
+    if (info === null) {
+      throw new Error("Badge account not found");
+    }
+    const asset = decodeCoreAsset(info.data);
+    expect(asset.owner.toBase58()).to.equal(winner.publicKey.toBase58());
+    expect(asset.name).to.equal("OpenBounty: Final Claim Bounty #1");
+
+    expect((await tokenBalance(winnerAccount)) - tokensBefore).to.equal(
+      100 * ONE_TOKEN
+    );
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["prizeClaimed"]);
+    expect(events[0].data.bountyClosed).to.equal(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // devnet smoke
 // ---------------------------------------------------------------------------
 
 // One full lifecycle against the deployed program: create a token bounty, vote
-// to finalize a tier, claim. It is skipped unless OPENBOUNTY_DEVNET=1, and with
-// that flag it is the only block that runs. It needs no time travel, so it
-// also runs unchanged on local Surfpool. To run it against devnet:
+// to finalize a tier, then mint the win badge and make the final claim in one
+// transaction, the way the client does. It is skipped unless
+// OPENBOUNTY_DEVNET=1, and with that flag it is the only block that runs. It
+// needs no time travel, so it also runs unchanged on local Surfpool. To run it
+// against devnet:
 //
 //   OPENBOUNTY_DEVNET=1 \
 //   ANCHOR_PROVIDER_URL=https://api.devnet.solana.com \
@@ -2194,14 +2483,14 @@ describeDevnet("devnet smoke", () => {
     for (const judge of judges) {
       await fund(judge.publicKey, FEE_LAMPORTS);
     }
-    // Enough for fees and for the rent of the token account the claim creates.
-    await fund(winner.publicKey, FEE_LAMPORTS);
+    // Fees, plus the badge account and the token account the claim creates.
+    await fund(winner.publicKey, 2 * FEE_LAMPORTS);
 
     mint = await createTestMint(TOKEN_PROGRAM_ID);
     await fundTokens(organizer.publicKey, mint, TOKEN_PROGRAM_ID, PRIZE);
   });
 
-  it("creates a token bounty, finalizes a tier by vote, and pays the winner", async () => {
+  it("creates a token bounty, finalizes a tier by vote, and pays the winner with a badge", async () => {
     const created = await createBounty(organizer, {
       title: "OpenBounty v2 Smoke Test",
       mint,
@@ -2222,10 +2511,19 @@ describeDevnet("devnet smoke", () => {
       winner.publicKey.toBase58()
     );
 
-    const claim = await claimPrize(winner, escrow, 0);
+    const claim = await mintBadgeAndClaim(winner, escrow, 0);
 
-    // The winner is paid the prize, and because this was the only tier the
-    // claim also closed both accounts.
+    // The winner owns the badge and is paid the prize, and because this was
+    // the only tier the claim also closed both accounts.
+    const [badge] = badgePda(escrow, 0);
+    const badgeInfo = await connection.getAccountInfo(badge, "confirmed");
+    if (badgeInfo === null) {
+      throw new Error("Badge account not found");
+    }
+    const asset = decodeCoreAsset(badgeInfo.data);
+    expect(asset.owner.toBase58()).to.equal(winner.publicKey.toBase58());
+    expect(asset.uri).to.equal(BADGE_URI);
+
     const winnerAccount = getAssociatedTokenAddressSync(mint, winner.publicKey);
     expect(await tokenBalance(winnerAccount)).to.equal(PRIZE);
     expect(await connection.getAccountInfo(escrow, "confirmed")).to.equal(null);
@@ -2244,6 +2542,7 @@ describeDevnet("devnet smoke", () => {
     console.log("      create bounty: " + created.signature);
     console.log("      first vote:    " + firstVote);
     console.log("      second vote:   " + secondVote);
-    console.log("      claim prize:   " + claim);
+    console.log("      badge:         " + badge.toBase58());
+    console.log("      badge + claim: " + claim);
   });
 });
