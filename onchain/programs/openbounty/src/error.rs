@@ -1,7 +1,9 @@
 use anchor_lang::prelude::*;
 
 // These messages are shown directly to users in the mobile app, so they
-// are written as plain sentences. Codes start at 6000, in this order.
+// are written as plain sentences. Codes start at 6000, in this order. A
+// variant's position is its code, and clients map codes to messages, so new
+// errors are only ever added at the end.
 #[error_code]
 pub enum ErrorCode {
     #[msg("Title must be between 1 and 50 bytes long.")]
@@ -40,10 +42,25 @@ pub enum ErrorCode {
     NotWinner,
     #[msg("Only the organizer of this bounty can do this.")]
     Unauthorized,
-    #[msg("Unclaimed funds can only be refunded after the deadline.")]
+    #[msg("Unclaimed funds can only be refunded after the claim deadline.")]
     DeadlineNotPassed,
     #[msg("There are no unclaimed funds to refund.")]
     NoUnclaimedFunds,
     #[msg("The prize amounts are too large to add up safely.")]
     ArithmeticOverflow,
+    // The "7 days" here must match MIN_CLAIM_WINDOW.
+    #[msg("The claim deadline must be at least 7 days after the voting deadline.")]
+    InvalidClaimDeadline,
+    #[msg("The organizer of a bounty cannot also be one of its judges.")]
+    OrganizerCannotJudge,
+    #[msg("Each judge can only be listed once.")]
+    DuplicateJudge,
+    #[msg("This token is not supported, because its issuer could move, tax or block the escrowed funds.")]
+    UnsupportedMint,
+    #[msg("The vault did not receive the full prize pool.")]
+    DepositMismatch,
+    #[msg("The claim period for this bounty has ended.")]
+    ClaimDeadlinePassed,
+    #[msg("This bounty was created by an incompatible version of the program.")]
+    UnsupportedEscrowVersion,
 }
