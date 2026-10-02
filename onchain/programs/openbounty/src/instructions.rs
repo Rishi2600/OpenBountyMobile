@@ -1,11 +1,13 @@
-// Each instruction is registered here again as it is converted to the v2
-// account model. Until then its file stays in instructions/ but is not
-// compiled, so every step of the migration still builds.
+// Each instruction's accounts struct and handler live in their own file. The
+// `pub use` lines make the accounts structs reachable from the crate root,
+// which Anchor's #[program] macro needs.
+pub mod badge;
 pub mod claim;
 pub mod initialize;
 pub mod refund;
 pub mod vote;
 
+pub use badge::*;
 pub use claim::*;
 pub use initialize::*;
 pub use refund::*;

@@ -52,4 +52,8 @@ pub mod openbounty {
     pub fn refund_unclaimed(ctx: Context<RefundUnclaimed>) -> Result<()> {
         instructions::refund::handle_refund_unclaimed(ctx)
     }
+
+    pub fn mint_win_badge(ctx: Context<MintWinBadge>, tier: u8) -> Result<()> {
+        instructions::badge::handle_mint_win_badge(ctx, tier)
+    }
 }

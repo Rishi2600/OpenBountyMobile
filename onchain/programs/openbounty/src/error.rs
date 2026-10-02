@@ -63,4 +63,6 @@ pub enum ErrorCode {
     ClaimDeadlinePassed,
     #[msg("This bounty was created by an incompatible version of the program.")]
     UnsupportedEscrowVersion,
+    #[msg("A badge has already been minted for this prize tier.")]
+    BadgeAlreadyMinted,
 }

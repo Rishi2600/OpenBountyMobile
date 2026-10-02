@@ -26,4 +26,12 @@ test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
 [surfpool]
 block_production_mode = "clock"
 
+# `anchor test` runs Surfpool offline, so programs this program calls must be
+# loaded from a file. Metaplex Core, for the win badge, was dumped from devnet
+# with `solana program dump` (last deployed in slot 492585604, sha256
+# 5680d2371204033f55cdcf0c08d393ed737d99cfe35d83f65befe80f7537484a).
+[[test.genesis]]
+address = "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+program = "tests/fixtures/mpl_core.so"
+
 [hooks]

@@ -1,0 +1,25 @@
+{
+  "name": "OpenBounty Winner",
+  "description": "Proof that this wallet won a prize tier in an OpenBounty bounty. The badge's on-chain name gives the bounty title and the prize number. The OpenBounty program on Solana (3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM) mints a badge only to the winner that the bounty's judges voted for.",
+  "image": "https://raw.githubusercontent.com/Rishi2600/OpenBountyMobile/master/assets/badge.png",
+  "external_url": "https://github.com/Rishi2600/OpenBountyMobile",
+  "attributes": [
+    {
+      "trait_type": "Program",
+      "value": "OpenBounty"
+    },
+    {
+      "trait_type": "Program ID",
+      "value": "3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM"
+    }
+  ],
+  "properties": {
+    "category": "image",
+    "files": [
+      {
+        "uri": "https://raw.githubusercontent.com/Rishi2600/OpenBountyMobile/master/assets/badge.png",
+        "type": "image/png"
+      }
+    ]
+  }
+}

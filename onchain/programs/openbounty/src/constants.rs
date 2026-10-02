@@ -23,6 +23,22 @@ pub const ESCROW_VERSION: u8 = 2;
 #[constant]
 pub const MIN_CLAIM_WINDOW: i64 = 7 * 24 * 60 * 60;
 
+// Seed prefixes for the win badge. A badge's address is derived from its
+// escrow and tier, so each tier can have at most one badge. The badge
+// authority is a single address shared by every badge and recorded as their
+// update authority; no instruction ever edits a badge.
+#[constant]
+pub const BADGE_SEED: &[u8] = b"badge";
+
+#[constant]
+pub const BADGE_AUTHORITY_SEED: &[u8] = b"badge_authority";
+
+// Every badge points to this one static metadata file, so badges never depend
+// on content an organizer controls.
+#[constant]
+pub const BADGE_URI: &str =
+    "https://raw.githubusercontent.com/Rishi2600/OpenBountyMobile/master/assets/badge.json";
+
 // Length limits are in bytes, because account space is allocated in bytes.
 pub const MAX_TITLE_LEN: usize = 50;
 pub const MAX_METADATA_URI_LEN: usize = 100;
