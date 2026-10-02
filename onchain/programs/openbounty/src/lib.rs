@@ -39,4 +39,8 @@ pub mod openbounty {
             claim_deadline,
         )
     }
+
+    pub fn vote_winner(ctx: Context<VoteWinner>, tier: u8, candidate: Pubkey) -> Result<()> {
+        instructions::vote::handle_vote_winner(ctx, tier, candidate)
+    }
 }

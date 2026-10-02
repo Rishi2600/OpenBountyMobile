@@ -2,5 +2,7 @@
 // account model. Until then its file stays in instructions/ but is not
 // compiled, so every step of the migration still builds.
 pub mod initialize;
+pub mod vote;
 
 pub use initialize::*;
+pub use vote::*;

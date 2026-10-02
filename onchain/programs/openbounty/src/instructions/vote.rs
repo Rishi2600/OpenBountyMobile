@@ -5,13 +5,18 @@ use crate::error::ErrorCode;
 use crate::state::{Escrow, TierVote};
 
 #[derive(Accounts)]
-#[instruction(nonce: u8)]
 pub struct VoteWinner<'info> {
-    // The organizer's key for the seeds is read from the escrow's own data,
-    // so a judge does not have to supply the organizer's account.
+    // The seeds are read from the escrow's own data, so a judge passes only
+    // the escrow's address. Bounty IDs are never reused, so that address names
+    // exactly one bounty forever, and a vote built for a closed bounty can
+    // never land on a newer one.
     #[account(
         mut,
-        seeds = [ESCROW_SEED, escrow.organizer.as_ref(), &[nonce]],
+        seeds = [
+            ESCROW_SEED,
+            escrow.organizer.as_ref(),
+            &escrow.bounty_id.to_le_bytes()
+        ],
         bump = escrow.bump
     )]
     pub escrow: Account<'info, Escrow>,
@@ -19,16 +24,16 @@ pub struct VoteWinner<'info> {
     pub judge: Signer<'info>,
 }
 
-// `_nonce` is only used by the accounts struct above, to check the escrow's
-// address.
-pub fn handle_vote_winner(
-    ctx: Context<VoteWinner>,
-    _nonce: u8,
-    tier: u8,
-    candidate: Pubkey,
-) -> Result<()> {
+pub fn handle_vote_winner(ctx: Context<VoteWinner>, tier: u8, candidate: Pubkey) -> Result<()> {
     let judge = ctx.accounts.judge.key();
     let escrow = &mut ctx.accounts.escrow;
+
+    // Checked before anything else is read, so an account written with a
+    // different layout is rejected instead of being misread.
+    require!(
+        escrow.version == ESCROW_VERSION,
+        ErrorCode::UnsupportedEscrowVersion
+    );
 
     require!(escrow.is_judge(&judge), ErrorCode::NotAJudge);
 
