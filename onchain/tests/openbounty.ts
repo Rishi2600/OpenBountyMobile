@@ -81,6 +81,10 @@ const CONFIRM: web3.ConfirmOptions = {
 
 const ONE_HOUR = 60 * 60;
 
+// Funding for wallets that only sign and pay fees, such as judges. It covers
+// the rent-exempt minimum a wallet must keep (about 0.0009 SOL) plus fees.
+const FEE_LAMPORTS = 5_000_000;
+
 // Must match MIN_CLAIM_WINDOW in the program: seven days, in seconds.
 const MIN_CLAIM_WINDOW = 7 * 24 * 60 * 60;
 
@@ -183,6 +187,70 @@ async function txFee(signature: string): Promise<number> {
     await sleep(500);
   }
   throw new Error("Transaction not found: " + signature);
+}
+
+// The shape of a JSON-RPC reply: `error` is set only when the call failed.
+type RpcReply = {
+  result?: unknown;
+  error?: unknown;
+};
+
+// Sends one of Surfpool's cheatcode RPC methods. They exist only on a local
+// Surfpool validator, and this refuses any other endpoint as well.
+async function surfnetCheatcode(method: string, params: unknown[]) {
+  if (!isLocalEndpoint(connection.rpcEndpoint)) {
+    throw new Error("Cheatcodes only run against a local validator");
+  }
+  const response = await fetch(connection.rpcEndpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const body = (await response.json()) as RpcReply;
+  if (body.error !== undefined) {
+    throw new Error(method + " failed: " + JSON.stringify(body.error));
+  }
+  return body.result;
+}
+
+// Moves the local clock forward until it is strictly past `timestamp` (Unix
+// seconds), so deadline tests do not wait in real time. Surfpool takes the
+// target in milliseconds and refuses a target in the past. After the jump
+// the clock keeps running from the new time.
+async function advanceClockPast(timestamp: number) {
+  if ((await chainNow()) > timestamp) {
+    return;
+  }
+  const targetMilliseconds = (timestamp + 1) * 1000;
+  await surfnetCheatcode("surfnet_timeTravel", [
+    { absoluteTimestamp: targetMilliseconds },
+  ]);
+  for (let attempt = 0; attempt < 60; attempt++) {
+    if ((await chainNow()) > timestamp) {
+      return;
+    }
+    await sleep(500);
+  }
+  throw new Error("On-chain clock never passed " + timestamp);
+}
+
+// Overwrites one byte of an account's data on the local validator and leaves
+// the rest of the account as it was.
+async function overwriteAccountByte(
+  address: web3.PublicKey,
+  offset: number,
+  value: number
+) {
+  const info = await connection.getAccountInfo(address);
+  if (info === null) {
+    throw new Error("Account not found: " + address.toBase58());
+  }
+  const data = Buffer.from(info.data);
+  data[offset] = value;
+  await surfnetCheatcode("surfnet_setAccount", [
+    address.toBase58(),
+    { data: data.toString("hex") },
+  ]);
 }
 
 // Asserts that `action` fails with the named program error, for example
@@ -420,6 +488,19 @@ async function createBounty(organizer: web3.Keypair, options: BountyOptions) {
     .rpc();
 
   return { escrow, vault, bountyId, signature };
+}
+
+// Casts one vote, signed and paid for by the judge.
+async function castVote(
+  judge: web3.Keypair,
+  escrow: web3.PublicKey,
+  tier: number,
+  candidate: web3.PublicKey
+) {
+  return programFor(judge)
+    .methods.voteWinner(tier, candidate)
+    .accountsPartial({ escrow, judge: judge.publicKey })
+    .rpc();
 }
 
 // ---------------------------------------------------------------------------
@@ -870,5 +951,252 @@ describeLocal("initialize_escrow", () => {
       { mint: hookMint, tokenProgram: TOKEN_2022_PROGRAM_ID, judges },
       "UnsupportedMint"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// vote_winner
+// ---------------------------------------------------------------------------
+
+describeLocal("vote_winner", () => {
+  const organizer = web3.Keypair.generate();
+  const judges = [
+    web3.Keypair.generate(),
+    web3.Keypair.generate(),
+    web3.Keypair.generate(),
+  ];
+  const judgeKeys = [
+    judges[0].publicKey,
+    judges[1].publicKey,
+    judges[2].publicKey,
+  ];
+
+  // Candidates only receive votes, so they never need funding.
+  const candidateA = web3.Keypair.generate().publicKey;
+  const candidateB = web3.Keypair.generate().publicKey;
+  const candidateC = web3.Keypair.generate().publicKey;
+
+  // A wallet that is not on any judge list.
+  const outsider = web3.Keypair.generate();
+
+  let mint: web3.PublicKey;
+
+  before(async () => {
+    await fund(organizer.publicKey, web3.LAMPORTS_PER_SOL);
+    for (const judge of judges) {
+      await fund(judge.publicKey, FEE_LAMPORTS);
+    }
+    await fund(outsider.publicKey, FEE_LAMPORTS);
+
+    mint = await createTestMint(TOKEN_PROGRAM_ID);
+    await fundTokens(
+      organizer.publicKey,
+      mint,
+      TOKEN_PROGRAM_ID,
+      10_000 * ONE_TOKEN
+    );
+  });
+
+  it("records a single vote without choosing a winner", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 2,
+    });
+
+    await castVote(judges[0], escrow, 0, candidateA);
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(1);
+    expect(tier.votes[0].judge.toBase58()).to.equal(
+      judges[0].publicKey.toBase58()
+    );
+    expect(tier.votes[0].candidate.toBase58()).to.equal(candidateA.toBase58());
+    expect(tier.winner).to.equal(null);
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("finalizes the tier when a candidate reaches the threshold", async () => {
+    const { escrow, vault } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 2,
+    });
+    const vaultBefore = await tokenBalance(vault);
+
+    await castVote(judges[0], escrow, 0, candidateA);
+    let tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.winner).to.equal(null);
+
+    await castVote(judges[1], escrow, 0, candidateA);
+    tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(2);
+    expect(tier.winner?.toBase58()).to.equal(candidateA.toBase58());
+    expect(tier.claimed).to.equal(false);
+
+    // Finalizing only records the winner. The prize stays in the vault until
+    // the winner claims it.
+    expect(await tokenBalance(vault)).to.equal(vaultBefore);
+  });
+
+  it("leaves the tier open when the votes are split", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 2,
+    });
+
+    await castVote(judges[0], escrow, 0, candidateA);
+    await castVote(judges[1], escrow, 0, candidateB);
+    await castVote(judges[2], escrow, 0, candidateC);
+
+    // Every judge has voted and no candidate has two votes, so the tier can
+    // never finalize.
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(3);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("finalizes two tiers independently", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 2,
+      tierAmounts: [300 * ONE_TOKEN, 100 * ONE_TOKEN],
+    });
+
+    await castVote(judges[0], escrow, 0, candidateA);
+    await castVote(judges[1], escrow, 0, candidateA);
+
+    // Tier 0 is decided, and tier 1 has not been touched.
+    let account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].winner?.toBase58()).to.equal(candidateA.toBase58());
+    expect(account.tiers[1].winner).to.equal(null);
+    expect(account.tiers[1].votes.length).to.equal(0);
+
+    // Judge 0 already voted on tier 0, and may still vote on tier 1.
+    await castVote(judges[0], escrow, 1, candidateB);
+    await castVote(judges[2], escrow, 1, candidateB);
+
+    account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].winner?.toBase58()).to.equal(candidateA.toBase58());
+    expect(account.tiers[0].votes.length).to.equal(2);
+    expect(account.tiers[1].winner?.toBase58()).to.equal(candidateB.toBase58());
+    expect(account.tiers[1].votes.length).to.equal(2);
+  });
+
+  it("rejects a vote from someone who is not a judge", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+    });
+
+    await expectError(castVote(outsider, escrow, 0, candidateA), "NotAJudge");
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(0);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("rejects a second vote from the same judge on the same tier", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 2,
+    });
+
+    await castVote(judges[0], escrow, 0, candidateA);
+    await expectError(
+      castVote(judges[0], escrow, 0, candidateA),
+      "AlreadyVoted"
+    );
+
+    // Only the first vote counts, so candidate A is still one vote short.
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(1);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("rejects a vote on a tier that already has a winner", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 2,
+    });
+
+    await castVote(judges[0], escrow, 0, candidateA);
+    await castVote(judges[1], escrow, 0, candidateA);
+    await expectError(
+      castVote(judges[2], escrow, 0, candidateB),
+      "TierAlreadyFinalized"
+    );
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(2);
+    expect(tier.winner?.toBase58()).to.equal(candidateA.toBase58());
+  });
+
+  it("rejects a vote on a tier that does not exist", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+    });
+
+    // The bounty has a single tier, at index 0.
+    await expectError(
+      castVote(judges[0], escrow, 1, candidateA),
+      "InvalidTierIndex"
+    );
+
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers.length).to.equal(1);
+    expect(account.tiers[0].votes.length).to.equal(0);
+  });
+
+  it("rejects a vote after the deadline", async () => {
+    // Far enough ahead for the creation transaction to land first. The test
+    // then moves the clock past it instead of waiting.
+    const deadline = (await chainNow()) + 60;
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      deadline,
+    });
+
+    await advanceClockPast(deadline);
+    await expectError(
+      castVote(judges[0], escrow, 0, candidateA),
+      "DeadlinePassed"
+    );
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(0);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("rejects an escrow written with a different layout version", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+    });
+
+    // Pretend a future program version wrote this escrow by changing its
+    // version byte, at offset 8, from 2 to 3.
+    await overwriteAccountByte(escrow, 8, 3);
+    const info = await connection.getAccountInfo(escrow);
+    if (info === null) {
+      throw new Error("Escrow account not found");
+    }
+    expect(info.data[8]).to.equal(3);
+    expect(info.owner.toBase58()).to.equal(program.programId.toBase58());
+
+    await expectError(
+      castVote(judges[0], escrow, 0, candidateA),
+      "UnsupportedEscrowVersion"
+    );
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(0);
+    expect(tier.winner).to.equal(null);
   });
 });
