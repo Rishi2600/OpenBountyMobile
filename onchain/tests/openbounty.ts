@@ -566,9 +566,23 @@ async function castVote(
   candidate: web3.PublicKey
 ) {
   return programFor(judge)
-    .methods.voteWinner(tier, candidate)
+    .methods.castVote(tier, candidate)
     .accountsPartial({ escrow, judge: judge.publicKey })
     .rpc();
+}
+
+// Sends one hand-built instruction, signed and paid for by `signer`, without
+// Anchor's client. Used for encodings the current IDL would never produce.
+async function sendRawInstruction(
+  signer: web3.Keypair,
+  instruction: web3.TransactionInstruction
+) {
+  const tx = new web3.Transaction().add(instruction);
+  const latest = await connection.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = latest.blockhash;
+  tx.feePayer = signer.publicKey;
+  tx.sign(signer);
+  return connection.sendRawTransaction(tx.serialize());
 }
 
 // Claims one tier, signed and paid for by `winner`. The mint, organizer and
@@ -1092,10 +1106,10 @@ describeLocal("initialize_escrow", () => {
 });
 
 // ---------------------------------------------------------------------------
-// vote_winner
+// cast_vote
 // ---------------------------------------------------------------------------
 
-describeLocal("vote_winner", () => {
+describeLocal("cast_vote", () => {
   const organizer = web3.Keypair.generate();
   const judges = [
     web3.Keypair.generate(),
@@ -1331,6 +1345,49 @@ describeLocal("vote_winner", () => {
       castVote(judges[0], escrow, 0, candidateA),
       "UnsupportedEscrowVersion"
     );
+
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(0);
+    expect(tier.winner).to.equal(null);
+  });
+
+  // v1 and the first v2 deploy called this instruction vote_winner. A vote
+  // encoded for that name must now be rejected outright, whatever its
+  // arguments, instead of being read with cast_vote's argument layout.
+  it("rejects a vote sent to the old vote_winner instruction", async () => {
+    const { escrow } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+    });
+    const oldDiscriminator = Buffer.from([44, 247, 50, 25, 60, 91, 248, 84]);
+
+    // v1's arguments: nonce, tier, candidate.
+    const v1Data = Buffer.concat([
+      oldDiscriminator,
+      Buffer.from([0, 0]),
+      candidateA.toBuffer(),
+    ]);
+    // The first v2 deploy's arguments: tier, candidate.
+    const v2Data = Buffer.concat([
+      oldDiscriminator,
+      Buffer.from([0]),
+      candidateA.toBuffer(),
+    ]);
+
+    for (const data of [v1Data, v2Data]) {
+      const oldVote = new web3.TransactionInstruction({
+        programId: program.programId,
+        keys: [
+          { pubkey: escrow, isSigner: false, isWritable: true },
+          { pubkey: judges[0].publicKey, isSigner: true, isWritable: false },
+        ],
+        data,
+      });
+      await expectError(
+        sendRawInstruction(judges[0], oldVote),
+        "InstructionFallbackNotFound"
+      );
+    }
 
     const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
     expect(tier.votes.length).to.equal(0);
@@ -1627,7 +1684,7 @@ describeLocal("claim_prize", () => {
 
     // The first judge signs a vote for this bounty but does not send it.
     const heldVote = await programFor(judge)
-      .methods.voteWinner(0, candidate)
+      .methods.castVote(0, candidate)
       .accountsPartial({ escrow: closed.escrow, judge: judge.publicKey })
       .transaction();
     const latest = await connection.getLatestBlockhash("confirmed");

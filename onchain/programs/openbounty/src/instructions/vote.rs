@@ -6,7 +6,7 @@ use crate::events::{TierFinalized, VoteCast};
 use crate::state::{Escrow, TierVote};
 
 #[derive(Accounts)]
-pub struct VoteWinner<'info> {
+pub struct CastVote<'info> {
     // The seeds are read from the escrow's own data, so a judge passes only
     // the escrow's address. Bounty IDs are never reused, so that address names
     // exactly one bounty forever, and a vote built for a closed bounty can
@@ -25,7 +25,7 @@ pub struct VoteWinner<'info> {
     pub judge: Signer<'info>,
 }
 
-pub fn handle_vote_winner(ctx: Context<VoteWinner>, tier: u8, candidate: Pubkey) -> Result<()> {
+pub fn handle_cast_vote(ctx: Context<CastVote>, tier: u8, candidate: Pubkey) -> Result<()> {
     let judge = ctx.accounts.judge.key();
     let escrow_key = ctx.accounts.escrow.key();
     let escrow = &mut ctx.accounts.escrow;

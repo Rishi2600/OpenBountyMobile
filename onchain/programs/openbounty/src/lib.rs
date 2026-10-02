@@ -41,8 +41,12 @@ pub mod openbounty {
         )
     }
 
-    pub fn vote_winner(ctx: Context<VoteWinner>, tier: u8, candidate: Pubkey) -> Result<()> {
-        instructions::vote::handle_vote_winner(ctx, tier, candidate)
+    // Named cast_vote rather than v1's vote_winner because the name sets the
+    // instruction's discriminator. With a new discriminator, a vote encoded
+    // for the old instruction is rejected instead of being read with the new
+    // argument layout.
+    pub fn cast_vote(ctx: Context<CastVote>, tier: u8, candidate: Pubkey) -> Result<()> {
+        instructions::vote::handle_cast_vote(ctx, tier, candidate)
     }
 
     pub fn claim_prize(ctx: Context<ClaimPrize>, tier: u8) -> Result<()> {
