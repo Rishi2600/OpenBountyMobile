@@ -267,9 +267,22 @@ async function expectError(action: Promise<unknown>, code: string) {
   }
   if (caught instanceof anchor.AnchorError) {
     expect(caught.error.errorCode.code).to.equal(code);
-  } else {
-    expect(String(caught)).to.equal(code);
+    return;
   }
+  // A transaction sent raw, rather than through Anchor's .rpc(), fails with
+  // web3's own error type. Its logs still carry Anchor's error line.
+  if (caught instanceof web3.SendTransactionError) {
+    let logs: string[] = [];
+    if (caught.logs !== undefined) {
+      logs = caught.logs;
+    }
+    const parsed = anchor.AnchorError.parse(logs);
+    if (parsed !== null) {
+      expect(parsed.error.errorCode.code).to.equal(code);
+      return;
+    }
+  }
+  expect(String(caught)).to.equal(code);
 }
 
 // A mint with no extensions. `tokenProgram` picks classic SPL Token or
@@ -369,13 +382,12 @@ async function createTransferHookMint(): Promise<web3.PublicKey> {
   );
 }
 
-// Gives `owner` an associated token account for `mint` holding `amount` base
-// units. The provider wallet pays for the account and mints the tokens.
-async function fundTokens(
+// Gives `owner` an empty associated token account for `mint`, paid for by the
+// provider wallet.
+async function createTokenAccount(
   owner: web3.PublicKey,
   mint: web3.PublicKey,
-  tokenProgram: web3.PublicKey,
-  amount: number
+  tokenProgram: web3.PublicKey
 ): Promise<web3.PublicKey> {
   const account = await getOrCreateAssociatedTokenAccount(
     connection,
@@ -387,18 +399,39 @@ async function fundTokens(
     CONFIRM,
     tokenProgram
   );
+  return account.address;
+}
+
+// Gives `owner` an associated token account for `mint` holding `amount` base
+// units. The provider wallet pays for the account and mints the tokens.
+async function fundTokens(
+  owner: web3.PublicKey,
+  mint: web3.PublicKey,
+  tokenProgram: web3.PublicKey,
+  amount: number
+): Promise<web3.PublicKey> {
+  const account = await createTokenAccount(owner, mint, tokenProgram);
   await mintTo(
     connection,
     payer,
     mint,
-    account.address,
+    account,
     payer,
     amount,
     [],
     CONFIRM,
     tokenProgram
   );
-  return account.address;
+  return account;
+}
+
+// The token program that owns `mint`, read the way a client would read it.
+async function tokenProgramOf(mint: web3.PublicKey): Promise<web3.PublicKey> {
+  const info = await connection.getAccountInfo(mint);
+  if (info === null) {
+    throw new Error("Mint not found: " + mint.toBase58());
+  }
+  return info.owner;
 }
 
 // A token account's balance in base units. Works for both token programs.
@@ -500,6 +533,45 @@ async function castVote(
   return programFor(judge)
     .methods.voteWinner(tier, candidate)
     .accountsPartial({ escrow, judge: judge.publicKey })
+    .rpc();
+}
+
+// Claims one tier, signed and paid for by `winner`. The mint, organizer and
+// token program are read from the chain, the way a client would find them. A
+// test can pass `organizer` to name someone else as the rent recipient.
+async function claimPrize(
+  winner: web3.Keypair,
+  escrow: web3.PublicKey,
+  tier: number,
+  organizer?: web3.PublicKey
+) {
+  const account = await program.account.escrow.fetch(escrow);
+  const tokenProgram = await tokenProgramOf(account.mint);
+
+  let rentRecipient = account.organizer;
+  if (organizer !== undefined) {
+    rentRecipient = organizer;
+  }
+
+  const [vault] = vaultPda(escrow);
+  const winnerTokenAccount = getAssociatedTokenAddressSync(
+    account.mint,
+    winner.publicKey,
+    false,
+    tokenProgram
+  );
+
+  return programFor(winner)
+    .methods.claimPrize(tier)
+    .accountsPartial({
+      escrow,
+      vault,
+      mint: account.mint,
+      winner: winner.publicKey,
+      winnerTokenAccount,
+      organizer: rentRecipient,
+      tokenProgram,
+    })
     .rpc();
 }
 
@@ -1198,5 +1270,328 @@ describeLocal("vote_winner", () => {
     const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
     expect(tier.votes.length).to.equal(0);
     expect(tier.winner).to.equal(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// claim_prize
+// ---------------------------------------------------------------------------
+
+describeLocal("claim_prize", () => {
+  const organizer = web3.Keypair.generate();
+  const judge = web3.Keypair.generate();
+  const secondJudge = web3.Keypair.generate();
+  const winner = web3.Keypair.generate();
+  const outsider = web3.Keypair.generate();
+
+  let mint: web3.PublicKey;
+  let token2022Mint: web3.PublicKey;
+
+  before(async () => {
+    await fund(organizer.publicKey, web3.LAMPORTS_PER_SOL);
+    await fund(judge.publicKey, FEE_LAMPORTS);
+    await fund(secondJudge.publicKey, FEE_LAMPORTS);
+    // Enough for fees and for the rent of the token account a claim creates.
+    await fund(winner.publicKey, FEE_LAMPORTS);
+    await fund(outsider.publicKey, FEE_LAMPORTS);
+
+    mint = await createTestMint(TOKEN_PROGRAM_ID);
+    token2022Mint = await createTestMint(TOKEN_2022_PROGRAM_ID);
+    await fundTokens(
+      organizer.publicKey,
+      mint,
+      TOKEN_PROGRAM_ID,
+      10_000 * ONE_TOKEN
+    );
+    await fundTokens(
+      organizer.publicKey,
+      token2022Mint,
+      TOKEN_2022_PROGRAM_ID,
+      1_000 * ONE_TOKEN
+    );
+
+    // The winner already has a token account for the classic mint, so most
+    // tests here measure only the prize and the fee. The Token-2022 test and
+    // one other test cover a claim that has to create the account.
+    await createTokenAccount(winner.publicKey, mint, TOKEN_PROGRAM_ID);
+  });
+
+  // Two tiers of 300 and 100 tokens, decided by a single judge's vote.
+  async function createTwoTierBounty() {
+    return createBounty(organizer, {
+      mint,
+      judges: [judge.publicKey],
+      threshold: 1,
+      tierAmounts: [300 * ONE_TOKEN, 100 * ONE_TOKEN],
+    });
+  }
+
+  it("pays the winner and marks the tier claimed", async () => {
+    const { escrow, vault } = await createTwoTierBounty();
+    await castVote(judge, escrow, 0, winner.publicKey);
+
+    const winnerAccount = getAssociatedTokenAddressSync(mint, winner.publicKey);
+    const winnerTokensBefore = await tokenBalance(winnerAccount);
+    const vaultBefore = await tokenBalance(vault);
+    const lamportsBefore = await connection.getBalance(winner.publicKey);
+
+    const signature = await claimPrize(winner, escrow, 0);
+
+    // The winner receives the full tier amount in tokens and, in SOL, pays
+    // only their own fee.
+    expect((await tokenBalance(winnerAccount)) - winnerTokensBefore).to.equal(
+      300 * ONE_TOKEN
+    );
+    expect(vaultBefore - (await tokenBalance(vault))).to.equal(300 * ONE_TOKEN);
+    const fee = await txFee(signature);
+    const lamportsAfter = await connection.getBalance(winner.publicKey);
+    expect(lamportsBefore - lamportsAfter).to.equal(fee);
+
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].claimed).to.equal(true);
+    expect(account.tiers[1].claimed).to.equal(false);
+  });
+
+  it("rejects a claim from someone who is not the winner", async () => {
+    const { escrow, vault } = await createTwoTierBounty();
+    await castVote(judge, escrow, 0, winner.publicKey);
+    const vaultBefore = await tokenBalance(vault);
+
+    await expectError(claimPrize(outsider, escrow, 0), "NotWinner");
+
+    expect(await tokenBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("rejects a second claim of the same tier", async () => {
+    const { escrow, vault } = await createTwoTierBounty();
+    await castVote(judge, escrow, 0, winner.publicKey);
+    await claimPrize(winner, escrow, 0);
+    const vaultAfterFirstClaim = await tokenBalance(vault);
+
+    await expectError(claimPrize(winner, escrow, 0), "TierAlreadyClaimed");
+
+    expect(await tokenBalance(vault)).to.equal(vaultAfterFirstClaim);
+  });
+
+  it("rejects a claim before the tier has a winner", async () => {
+    const { escrow, vault } = await createTwoTierBounty();
+    const vaultBefore = await tokenBalance(vault);
+
+    await expectError(claimPrize(winner, escrow, 0), "TierNotFinalized");
+
+    expect(await tokenBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.winner).to.equal(null);
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("creates the token account of a winner who has none, at the winner's cost", async () => {
+    const newWinner = web3.Keypair.generate();
+    await fund(newWinner.publicKey, FEE_LAMPORTS);
+
+    const { escrow } = await createTwoTierBounty();
+    await castVote(judge, escrow, 0, newWinner.publicKey);
+
+    const newWinnerAccount = getAssociatedTokenAddressSync(
+      mint,
+      newWinner.publicKey
+    );
+    expect(await connection.getAccountInfo(newWinnerAccount)).to.equal(null);
+    const lamportsBefore = await connection.getBalance(newWinner.publicKey);
+
+    const signature = await claimPrize(newWinner, escrow, 0);
+
+    const created = await getAccount(connection, newWinnerAccount, "confirmed");
+    expect(created.owner.toBase58()).to.equal(newWinner.publicKey.toBase58());
+    expect(created.mint.toBase58()).to.equal(mint.toBase58());
+    expect(Number(created.amount)).to.equal(300 * ONE_TOKEN);
+
+    // The winner paid the fee and the new account's rent, nothing else.
+    const accountRent = await connection.getBalance(newWinnerAccount);
+    const fee = await txFee(signature);
+    const lamportsAfter = await connection.getBalance(newWinner.publicKey);
+    expect(lamportsBefore - lamportsAfter).to.equal(fee + accountRent);
+  });
+
+  it("rejects a claim that names someone else as the organizer", async () => {
+    const { escrow, vault } = await createTwoTierBounty();
+    await castVote(judge, escrow, 0, winner.publicKey);
+    const vaultBefore = await tokenBalance(vault);
+
+    // The organizer account only receives rent when the bounty closes. A
+    // winner naming their own wallet here would collect that rent.
+    await expectError(
+      claimPrize(winner, escrow, 0, winner.publicKey),
+      "Unauthorized"
+    );
+
+    expect(await tokenBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("closes both accounts on the final claim and returns their rent to the organizer", async () => {
+    const { escrow, vault } = await createTwoTierBounty();
+    await castVote(judge, escrow, 0, winner.publicKey);
+    await castVote(judge, escrow, 1, winner.publicKey);
+    await claimPrize(winner, escrow, 0);
+
+    // Before the final claim the vault holds only tier 1's prize.
+    expect(await tokenBalance(vault)).to.equal(100 * ONE_TOKEN);
+    const escrowRent = await connection.getBalance(escrow);
+    const vaultRent = await connection.getBalance(vault);
+    const organizerBefore = await connection.getBalance(organizer.publicKey);
+    const winnerAccount = getAssociatedTokenAddressSync(mint, winner.publicKey);
+    const winnerTokensBefore = await tokenBalance(winnerAccount);
+
+    await claimPrize(winner, escrow, 1);
+
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+
+    // The winner gets tier 1's prize. The organizer signed nothing, and
+    // receives exactly the rent that kept both accounts alive.
+    expect((await tokenBalance(winnerAccount)) - winnerTokensBefore).to.equal(
+      100 * ONE_TOKEN
+    );
+    const organizerAfter = await connection.getBalance(organizer.publicKey);
+    expect(organizerAfter - organizerBefore).to.equal(escrowRent + vaultRent);
+  });
+
+  it("pays tokens sent straight to the vault to the last claimer", async () => {
+    const { escrow, vault } = await createBounty(organizer, {
+      mint,
+      judges: [judge.publicKey],
+      tierAmounts: [100 * ONE_TOKEN],
+    });
+    await castVote(judge, escrow, 0, winner.publicKey);
+
+    // Anyone can send tokens to a token account. 5 extra tokens arrive in the
+    // vault that no tier accounts for.
+    await mintTo(
+      connection,
+      payer,
+      mint,
+      vault,
+      payer,
+      5 * ONE_TOKEN,
+      [],
+      CONFIRM,
+      TOKEN_PROGRAM_ID
+    );
+    expect(await tokenBalance(vault)).to.equal(105 * ONE_TOKEN);
+
+    const winnerAccount = getAssociatedTokenAddressSync(mint, winner.publicKey);
+    const winnerTokensBefore = await tokenBalance(winnerAccount);
+
+    await claimPrize(winner, escrow, 0);
+
+    // The final claim empties the vault, so the bounty can still close.
+    expect((await tokenBalance(winnerAccount)) - winnerTokensBefore).to.equal(
+      105 * ONE_TOKEN
+    );
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+  });
+
+  it("pays a Token-2022 prize", async () => {
+    const { escrow, vault } = await createBounty(organizer, {
+      mint: token2022Mint,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      judges: [judge.publicKey],
+      tierAmounts: [250 * ONE_TOKEN],
+    });
+    await castVote(judge, escrow, 0, winner.publicKey);
+
+    await claimPrize(winner, escrow, 0);
+
+    // The winner had no Token-2022 account for this mint, so the claim
+    // created one under the Token-2022 program.
+    const winnerAccount = getAssociatedTokenAddressSync(
+      token2022Mint,
+      winner.publicKey,
+      false,
+      TOKEN_2022_PROGRAM_ID
+    );
+    const info = await connection.getAccountInfo(winnerAccount);
+    if (info === null) {
+      throw new Error("Winner token account not found");
+    }
+    expect(info.owner.toBase58()).to.equal(TOKEN_2022_PROGRAM_ID.toBase58());
+    expect(await tokenBalance(winnerAccount)).to.equal(250 * ONE_TOKEN);
+
+    // It was the only tier, so the bounty closed.
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+  });
+
+  it("rejects a claim after the claim deadline", async () => {
+    const deadline = (await chainNow()) + 60;
+    const claimDeadline = deadline + MIN_CLAIM_WINDOW;
+    const { escrow, vault } = await createBounty(organizer, {
+      mint,
+      judges: [judge.publicKey],
+      deadline,
+      claimDeadline,
+    });
+    await castVote(judge, escrow, 0, winner.publicKey);
+    const vaultBefore = await tokenBalance(vault);
+
+    await advanceClockPast(claimDeadline);
+    await expectError(claimPrize(winner, escrow, 0), "ClaimDeadlinePassed");
+
+    expect(await tokenBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.claimed).to.equal(false);
+  });
+
+  // The v1 bug: escrow addresses were reused, so a vote signed for a closed
+  // bounty landed on the next bounty at the same address. Bounty IDs are now
+  // never reused, so the held vote can only ever reach the closed bounty.
+  it("does not let a vote held back for a closed bounty touch the next bounty", async () => {
+    const judges = [judge.publicKey, secondJudge.publicKey];
+    const candidate = web3.Keypair.generate().publicKey;
+
+    const closed = await createBounty(organizer, {
+      mint,
+      judges,
+      threshold: 1,
+    });
+
+    // The first judge signs a vote for this bounty but does not send it.
+    const heldVote = await programFor(judge)
+      .methods.voteWinner(0, candidate)
+      .accountsPartial({ escrow: closed.escrow, judge: judge.publicKey })
+      .transaction();
+    const latest = await connection.getLatestBlockhash("confirmed");
+    heldVote.recentBlockhash = latest.blockhash;
+    heldVote.feePayer = judge.publicKey;
+    heldVote.sign(judge);
+
+    // The second judge decides the tier, and the winner's claim closes it.
+    await castVote(secondJudge, closed.escrow, 0, winner.publicKey);
+    await claimPrize(winner, closed.escrow, 0);
+    expect(await connection.getAccountInfo(closed.escrow)).to.equal(null);
+
+    // The organizer's next bounty, with the same judges, gets a new address.
+    const next = await createBounty(organizer, {
+      mint,
+      judges,
+      threshold: 1,
+    });
+    expect(next.escrow.toBase58()).to.not.equal(closed.escrow.toBase58());
+
+    // The held vote still targets the closed bounty, which no longer exists.
+    await expectError(
+      connection.sendRawTransaction(heldVote.serialize()),
+      "AccountNotInitialized"
+    );
+
+    const tier = (await program.account.escrow.fetch(next.escrow)).tiers[0];
+    expect(tier.votes.length).to.equal(0);
+    expect(tier.winner).to.equal(null);
+    expect(await connection.getAccountInfo(closed.escrow)).to.equal(null);
   });
 });
