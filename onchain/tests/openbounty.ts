@@ -4,6 +4,7 @@ import {
   ExtensionType,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
+  closeAccount,
   createInitializeMintInstruction,
   createInitializePermanentDelegateInstruction,
   createInitializeTransferFeeConfigInstruction,
@@ -570,6 +571,36 @@ async function claimPrize(
       winner: winner.publicKey,
       winnerTokenAccount,
       organizer: rentRecipient,
+      tokenProgram,
+    })
+    .rpc();
+}
+
+// Asks for a refund, signed and paid for by `signer`, who is also passed as
+// the organizer, so a test can have someone else attempt the refund. The mint
+// is passed in rather than read from the escrow, which may already be closed.
+async function refundUnclaimed(
+  signer: web3.Keypair,
+  escrow: web3.PublicKey,
+  mint: web3.PublicKey
+) {
+  const tokenProgram = await tokenProgramOf(mint);
+  const [vault] = vaultPda(escrow);
+  const organizerTokenAccount = getAssociatedTokenAddressSync(
+    mint,
+    signer.publicKey,
+    false,
+    tokenProgram
+  );
+
+  return programFor(signer)
+    .methods.refundUnclaimed()
+    .accountsPartial({
+      escrow,
+      vault,
+      mint,
+      organizer: signer.publicKey,
+      organizerTokenAccount,
       tokenProgram,
     })
     .rpc();
@@ -1593,5 +1624,296 @@ describeLocal("claim_prize", () => {
     expect(tier.votes.length).to.equal(0);
     expect(tier.winner).to.equal(null);
     expect(await connection.getAccountInfo(closed.escrow)).to.equal(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refund_unclaimed
+// ---------------------------------------------------------------------------
+
+describeLocal("refund_unclaimed", () => {
+  const organizer = web3.Keypair.generate();
+  const judge = web3.Keypair.generate();
+  const winner = web3.Keypair.generate();
+  const outsider = web3.Keypair.generate();
+
+  let mint: web3.PublicKey;
+  let organizerAccount: web3.PublicKey;
+
+  before(async () => {
+    await fund(organizer.publicKey, web3.LAMPORTS_PER_SOL);
+    await fund(judge.publicKey, FEE_LAMPORTS);
+    // Enough for fees and for the rent of the token account a claim creates.
+    await fund(winner.publicKey, FEE_LAMPORTS);
+    // A refund attempt creates the signer's token account before the program
+    // rejects the signer, so the outsider needs that rent too.
+    await fund(outsider.publicKey, FEE_LAMPORTS);
+
+    mint = await createTestMint(TOKEN_PROGRAM_ID);
+    organizerAccount = await fundTokens(
+      organizer.publicKey,
+      mint,
+      TOKEN_PROGRAM_ID,
+      10_000 * ONE_TOKEN
+    );
+  });
+
+  // Two tiers of 300 and 100 tokens, decided by a single judge's vote. Voting
+  // closes in a minute and claiming exactly MIN_CLAIM_WINDOW after that, so
+  // tests can move the clock past either deadline.
+  async function createTwoTierBounty() {
+    const deadline = (await chainNow()) + 60;
+    const claimDeadline = deadline + MIN_CLAIM_WINDOW;
+    const created = await createBounty(organizer, {
+      mint,
+      judges: [judge.publicKey],
+      threshold: 1,
+      tierAmounts: [300 * ONE_TOKEN, 100 * ONE_TOKEN],
+      deadline,
+      claimDeadline,
+    });
+    return {
+      escrow: created.escrow,
+      vault: created.vault,
+      deadline,
+      claimDeadline,
+    };
+  }
+
+  it("refunds every unclaimed tier after the claim deadline and closes both accounts", async () => {
+    const { escrow, vault, claimDeadline } = await createTwoTierBounty();
+
+    // Tier 0 gets a winner who never claims. Tier 1 never gets a winner. Both
+    // count as unclaimed once the claim deadline has passed.
+    await castVote(judge, escrow, 0, winner.publicKey);
+    await advanceClockPast(claimDeadline);
+
+    expect(await tokenBalance(vault)).to.equal(400 * ONE_TOKEN);
+    const escrowRent = await connection.getBalance(escrow);
+    const vaultRent = await connection.getBalance(vault);
+    const lamportsBefore = await connection.getBalance(organizer.publicKey);
+    const tokensBefore = await tokenBalance(organizerAccount);
+
+    const signature = await refundUnclaimed(organizer, escrow, mint);
+
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+
+    // The whole 400-token pool comes back, and in SOL both accounts' rent,
+    // less the fee for this transaction.
+    expect((await tokenBalance(organizerAccount)) - tokensBefore).to.equal(
+      400 * ONE_TOKEN
+    );
+    const fee = await txFee(signature);
+    const lamportsAfter = await connection.getBalance(organizer.publicKey);
+    expect(lamportsAfter - lamportsBefore).to.equal(
+      escrowRent + vaultRent - fee
+    );
+  });
+
+  it("rejects a refund before the deadline", async () => {
+    const { escrow, vault } = await createBounty(organizer, {
+      mint,
+      judges: [judge.publicKey],
+    });
+    const vaultBefore = await tokenBalance(vault);
+
+    await expectError(
+      refundUnclaimed(organizer, escrow, mint),
+      "DeadlineNotPassed"
+    );
+
+    expect(await tokenBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("rejects a refund between the deadline and the claim deadline", async () => {
+    const { escrow, vault, deadline } = await createTwoTierBounty();
+    await castVote(judge, escrow, 0, winner.publicKey);
+
+    // Voting has closed, but the winner's claim window is still open.
+    await advanceClockPast(deadline);
+    await expectError(
+      refundUnclaimed(organizer, escrow, mint),
+      "DeadlineNotPassed"
+    );
+
+    expect(await tokenBalance(vault)).to.equal(400 * ONE_TOKEN);
+    const account = await program.account.escrow.fetch(escrow);
+    expect(account.tiers[0].claimed).to.equal(false);
+    expect(account.tiers[1].claimed).to.equal(false);
+  });
+
+  it("rejects a refund from someone who is not the organizer", async () => {
+    const { escrow, vault, claimDeadline } = await createTwoTierBounty();
+
+    // Past the claim deadline a refund is allowed, so the signer is the only
+    // thing wrong with this attempt.
+    await advanceClockPast(claimDeadline);
+    const vaultBefore = await tokenBalance(vault);
+
+    await expectError(refundUnclaimed(outsider, escrow, mint), "Unauthorized");
+
+    expect(await tokenBalance(vault)).to.equal(vaultBefore);
+    const tier = (await program.account.escrow.fetch(escrow)).tiers[0];
+    expect(tier.claimed).to.equal(false);
+  });
+
+  it("rejects a refund once every tier has been claimed", async () => {
+    const deadline = (await chainNow()) + 60;
+    const claimDeadline = deadline + MIN_CLAIM_WINDOW;
+    const { escrow, vault } = await createBounty(organizer, {
+      mint,
+      judges: [judge.publicKey],
+      deadline,
+      claimDeadline,
+    });
+    await castVote(judge, escrow, 0, winner.publicKey);
+    await claimPrize(winner, escrow, 0);
+    await advanceClockPast(claimDeadline);
+
+    // The final claim already closed the escrow, so there is no account left
+    // to refund from. Anchor rejects the missing account before the program's
+    // own NoUnclaimedFunds check can run.
+    const lamportsBefore = await connection.getBalance(organizer.publicKey);
+    const tokensBefore = await tokenBalance(organizerAccount);
+    await expectError(
+      refundUnclaimed(organizer, escrow, mint),
+      "AccountNotInitialized"
+    );
+
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+    expect(await connection.getBalance(organizer.publicKey)).to.equal(
+      lamportsBefore
+    );
+    expect(await tokenBalance(organizerAccount)).to.equal(tokensBefore);
+  });
+
+  it("refunds only the unclaimed tiers when some were already claimed", async () => {
+    const { escrow, vault, claimDeadline } = await createTwoTierBounty();
+
+    // Tier 0 (300 tokens) is won and claimed. Tier 1 (100 tokens) never gets
+    // a winner.
+    await castVote(judge, escrow, 0, winner.publicKey);
+    await claimPrize(winner, escrow, 0);
+    await advanceClockPast(claimDeadline);
+
+    const escrowRent = await connection.getBalance(escrow);
+    const vaultRent = await connection.getBalance(vault);
+    const lamportsBefore = await connection.getBalance(organizer.publicKey);
+    const tokensBefore = await tokenBalance(organizerAccount);
+
+    const signature = await refundUnclaimed(organizer, escrow, mint);
+
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+
+    // Only tier 1's 100 tokens come back, not the original 400-token pool.
+    expect((await tokenBalance(organizerAccount)) - tokensBefore).to.equal(
+      100 * ONE_TOKEN
+    );
+    const fee = await txFee(signature);
+    const lamportsAfter = await connection.getBalance(organizer.publicKey);
+    expect(lamportsAfter - lamportsBefore).to.equal(
+      escrowRent + vaultRent - fee
+    );
+  });
+
+  it("keeps a won tier claimable after voting closes, until the claim deadline", async () => {
+    const { escrow, vault, deadline, claimDeadline } =
+      await createTwoTierBounty();
+    await castVote(judge, escrow, 0, winner.publicKey);
+
+    // Voting has closed. In v1 the organizer could now refund the won tier;
+    // in v2 the winner can still claim it.
+    await advanceClockPast(deadline);
+    // The winner already collected prizes in earlier tests, so this measures
+    // the change in their balance.
+    const winnerAccount = getAssociatedTokenAddressSync(mint, winner.publicKey);
+    const winnerTokensBefore = await tokenBalance(winnerAccount);
+    await claimPrize(winner, escrow, 0);
+    expect((await tokenBalance(winnerAccount)) - winnerTokensBefore).to.equal(
+      300 * ONE_TOKEN
+    );
+    expect(await tokenBalance(vault)).to.equal(100 * ONE_TOKEN);
+
+    // After the claim deadline the organizer gets back only the tier nobody
+    // won.
+    await advanceClockPast(claimDeadline);
+    const tokensBefore = await tokenBalance(organizerAccount);
+    await refundUnclaimed(organizer, escrow, mint);
+
+    expect((await tokenBalance(organizerAccount)) - tokensBefore).to.equal(
+      100 * ONE_TOKEN
+    );
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+  });
+
+  it("recreates the organizer's token account if they closed it", async () => {
+    // A second organizer who deposits every token they hold and then closes
+    // their emptied token account.
+    const emptiedOrganizer = web3.Keypair.generate();
+    await fund(emptiedOrganizer.publicKey, 100_000_000);
+    const emptiedAccount = await fundTokens(
+      emptiedOrganizer.publicKey,
+      mint,
+      TOKEN_PROGRAM_ID,
+      100 * ONE_TOKEN
+    );
+
+    const deadline = (await chainNow()) + 60;
+    const claimDeadline = deadline + MIN_CLAIM_WINDOW;
+    const { escrow, vault } = await createBounty(emptiedOrganizer, {
+      mint,
+      judges: [judge.publicKey],
+      tierAmounts: [100 * ONE_TOKEN],
+      deadline,
+      claimDeadline,
+    });
+    expect(await tokenBalance(emptiedAccount)).to.equal(0);
+    await closeAccount(
+      connection,
+      payer,
+      emptiedAccount,
+      emptiedOrganizer.publicKey,
+      emptiedOrganizer,
+      [],
+      CONFIRM,
+      TOKEN_PROGRAM_ID
+    );
+    expect(await connection.getAccountInfo(emptiedAccount)).to.equal(null);
+
+    await advanceClockPast(claimDeadline);
+    const escrowRent = await connection.getBalance(escrow);
+    const vaultRent = await connection.getBalance(vault);
+    const lamportsBefore = await connection.getBalance(
+      emptiedOrganizer.publicKey
+    );
+
+    const signature = await refundUnclaimed(emptiedOrganizer, escrow, mint);
+
+    // The refund recreated the same associated token account and paid the
+    // 100 tokens into it.
+    const recreated = await getAccount(connection, emptiedAccount, "confirmed");
+    expect(recreated.owner.toBase58()).to.equal(
+      emptiedOrganizer.publicKey.toBase58()
+    );
+    expect(Number(recreated.amount)).to.equal(100 * ONE_TOKEN);
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+    expect(await connection.getAccountInfo(vault)).to.equal(null);
+
+    // In SOL the organizer got both rents back, less the fee and the rent of
+    // the recreated token account.
+    const accountRent = await connection.getBalance(emptiedAccount);
+    const fee = await txFee(signature);
+    const lamportsAfter = await connection.getBalance(
+      emptiedOrganizer.publicKey
+    );
+    expect(lamportsAfter - lamportsBefore).to.equal(
+      escrowRent + vaultRent - fee - accountRent
+    );
   });
 });
