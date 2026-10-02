@@ -2546,3 +2546,102 @@ describeDevnet("devnet smoke", () => {
     console.log("      badge + claim: " + claim);
   });
 });
+
+// ---------------------------------------------------------------------------
+// squads judge
+// ---------------------------------------------------------------------------
+
+// A Squads multisig vault as a judge. The program needs no change for this:
+// cast_vote only requires the judge's signature, and Squads signs for its
+// vault when the multisig executes a transaction. This test only sets the
+// bounty up. It creates a bounty whose single judge is the vault, and prints
+// the cast_vote instruction for the Squads transaction builder. The vote is
+// then proposed, approved and executed in the Squads app.
+//
+// It runs only with OPENBOUNTY_DEVNET=1 and OPENBOUNTY_SQUADS_VAULT set to the
+// vault's address (the vault, not the multisig account):
+//
+//   OPENBOUNTY_DEVNET=1 OPENBOUNTY_SQUADS_VAULT=<vault address> \
+//   ANCHOR_PROVIDER_URL=https://api.devnet.solana.com \
+//   ANCHOR_WALLET=$HOME/.config/solana/id.json \
+//   yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/openbounty.ts \
+//     --grep "Squads"
+describeDevnet("squads judge", () => {
+  const organizer = web3.Keypair.generate();
+  const candidate = web3.Keypair.generate().publicKey;
+  const squadsVaultAddress = process.env.OPENBOUNTY_SQUADS_VAULT;
+
+  it("creates a bounty judged by a Squads vault and prints its vote", async function () {
+    if (squadsVaultAddress === undefined) {
+      this.skip();
+    }
+    const squadsVault = new web3.PublicKey(squadsVaultAddress);
+
+    // The rent of the profile, escrow and vault, plus fees.
+    await fund(organizer.publicKey, 25_000_000);
+    const mint = await createTestMint(TOKEN_PROGRAM_ID);
+    await fundTokens(organizer.publicKey, mint, TOKEN_PROGRAM_ID, ONE_TOKEN);
+
+    // A day to vote, so the multisig's members have time to approve.
+    const deadline = (await chainNow()) + 24 * ONE_HOUR;
+    const created = await createBounty(organizer, {
+      title: "OpenBounty Squads Judge Test",
+      mint,
+      judges: [squadsVault],
+      threshold: 1,
+      tierAmounts: [ONE_TOKEN],
+      deadline,
+    });
+
+    const account = await program.account.escrow.fetch(
+      created.escrow,
+      "confirmed"
+    );
+    expect(account.judges.length).to.equal(1);
+    expect(account.judges[0].toBase58()).to.equal(squadsVault.toBase58());
+    expect(account.tiers[0].votes.length).to.equal(0);
+
+    // The vote the multisig must execute: tier 0, for `candidate`, signed by
+    // the vault.
+    const vote = await program.methods
+      .castVote(0, candidate)
+      .accountsPartial({ escrow: created.escrow, judge: squadsVault })
+      .instruction();
+
+    // The same instruction as an unsigned transaction message with the vault
+    // as fee payer, for tools that import a whole message.
+    const latest = await connection.getLatestBlockhash("confirmed");
+    const message = new web3.Transaction({
+      feePayer: squadsVault,
+      recentBlockhash: latest.blockhash,
+    })
+      .add(vote)
+      .serializeMessage();
+
+    const bs58 = anchor.utils.bytes.bs58;
+    console.log("      create bounty:   " + created.signature);
+    console.log("      escrow:          " + created.escrow.toBase58());
+    console.log(
+      "      voting deadline: " + new Date(deadline * 1000).toISOString()
+    );
+    console.log("      judge (vault):   " + squadsVault.toBase58());
+    console.log("      candidate:       " + candidate.toBase58());
+    console.log(
+      "      cast_vote instruction for the Squads transaction builder:"
+    );
+    console.log("        program: " + vote.programId.toBase58());
+    for (const key of vote.keys) {
+      console.log(
+        "        account: " +
+          key.pubkey.toBase58() +
+          " signer=" +
+          key.isSigner +
+          " writable=" +
+          key.isWritable
+      );
+    }
+    console.log("        data (hex):    " + vote.data.toString("hex"));
+    console.log("        data (base58): " + bs58.encode(vote.data));
+    console.log("      message (base58): " + bs58.encode(message));
+  });
+});
