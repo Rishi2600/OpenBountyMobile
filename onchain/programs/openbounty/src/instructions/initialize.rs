@@ -7,6 +7,7 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, Tran
 
 use crate::constants::*;
 use crate::error::ErrorCode;
+use crate::events::BountyCreated;
 use crate::state::{Escrow, OrganizerProfile, PrizeTier};
 
 #[derive(Accounts)]
@@ -139,7 +140,17 @@ pub fn handle_initialize_escrow(
     escrow.metadata_uri = metadata_uri;
     escrow.tiers = build_tiers(&tier_amounts);
 
-    deposit_prize_pool(ctx.accounts, prize_total)
+    deposit_prize_pool(ctx.accounts, prize_total)?;
+
+    emit!(BountyCreated {
+        escrow: ctx.accounts.escrow.key(),
+        bounty_id,
+        organizer,
+        mint,
+        prize_total,
+    });
+
+    Ok(())
 }
 
 fn require_organizer_not_judge(judges: &[Pubkey], organizer: &Pubkey) -> Result<()> {

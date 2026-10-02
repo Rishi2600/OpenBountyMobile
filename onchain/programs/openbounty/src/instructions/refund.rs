@@ -4,6 +4,7 @@ use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::*;
 use crate::error::ErrorCode;
+use crate::events::BountyRefunded;
 use crate::state::Escrow;
 use crate::vault::{close_vault, transfer_from_vault};
 
@@ -61,6 +62,9 @@ pub struct RefundUnclaimed<'info> {
 }
 
 pub fn handle_refund_unclaimed(ctx: Context<RefundUnclaimed>) -> Result<()> {
+    let escrow_key = ctx.accounts.escrow.key();
+    let bounty_id = ctx.accounts.escrow.bounty_id;
+    let organizer = ctx.accounts.organizer.key();
     let escrow = &mut ctx.accounts.escrow;
 
     // Checked before anything else is read, so an account written with a
@@ -99,6 +103,13 @@ pub fn handle_refund_unclaimed(ctx: Context<RefundUnclaimed>) -> Result<()> {
         &ctx.accounts.token_program,
         vault_balance,
     )?;
+
+    emit!(BountyRefunded {
+        escrow: escrow_key,
+        bounty_id,
+        organizer,
+        amount: vault_balance,
+    });
 
     close_vault(
         &ctx.accounts.vault,

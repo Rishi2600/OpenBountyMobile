@@ -4,6 +4,7 @@ use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::*;
 use crate::error::ErrorCode;
+use crate::events::PrizeClaimed;
 use crate::state::Escrow;
 use crate::vault::{close_vault, transfer_from_vault};
 
@@ -65,6 +66,8 @@ pub struct ClaimPrize<'info> {
 
 pub fn handle_claim_prize(ctx: Context<ClaimPrize>, tier: u8) -> Result<()> {
     let claimant = ctx.accounts.winner.key();
+    let escrow_key = ctx.accounts.escrow.key();
+    let bounty_id = ctx.accounts.escrow.bounty_id;
     let escrow = &mut ctx.accounts.escrow;
 
     // Checked before anything else is read, so an account written with a
@@ -113,6 +116,15 @@ pub fn handle_claim_prize(ctx: Context<ClaimPrize>, tier: u8) -> Result<()> {
         &ctx.accounts.token_program,
         payout,
     )?;
+
+    emit!(PrizeClaimed {
+        escrow: escrow_key,
+        bounty_id,
+        tier,
+        winner: claimant,
+        amount: payout,
+        bounty_closed: is_final_claim,
+    });
 
     // Anchor's `close` constraint would close on every claim, but the accounts
     // may only close once every tier is paid out, so the close is done here by

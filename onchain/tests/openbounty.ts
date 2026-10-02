@@ -176,18 +176,52 @@ function sleep(ms: number) {
 
 // A public RPC node (such as devnet's) can take a moment to serve a
 // transaction it has just confirmed, so this retries briefly before failing.
-async function txFee(signature: string): Promise<number> {
+async function fetchTransactionMeta(
+  signature: string
+): Promise<web3.ConfirmedTransactionMeta> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const tx = await connection.getTransaction(signature, {
       commitment: "confirmed",
       maxSupportedTransactionVersion: 0,
     });
     if (tx !== null && tx.meta !== null) {
-      return tx.meta.fee;
+      return tx.meta;
     }
     await sleep(500);
   }
   throw new Error("Transaction not found: " + signature);
+}
+
+async function txFee(signature: string): Promise<number> {
+  const meta = await fetchTransactionMeta(signature);
+  return meta.fee;
+}
+
+// The events a transaction emitted, in order, decoded from its logs. Each
+// has the event's `name` and its fields in `data`.
+async function eventsOf(signature: string): Promise<anchor.Event[]> {
+  const meta = await fetchTransactionMeta(signature);
+  let logs: string[] = [];
+  if (meta.logMessages !== null && meta.logMessages !== undefined) {
+    logs = meta.logMessages;
+  }
+  const parser = new anchor.EventParser(program.programId, program.coder);
+  const events: anchor.Event[] = [];
+  for (const event of parser.parseLogs(logs)) {
+    events.push(event);
+  }
+  return events;
+}
+
+// The names of a transaction's events, in order. Anchor's TypeScript client
+// reports them in camelCase ("bountyCreated"), while the IDL and the Rust code
+// name them in PascalCase ("BountyCreated").
+function eventNames(events: anchor.Event[]): string[] {
+  const names: string[] = [];
+  for (const event of events) {
+    names.push(event.name);
+  }
+  return names;
 }
 
 // The shape of a JSON-RPC reply: `error` is set only when the call failed.
@@ -1915,5 +1949,156 @@ describeLocal("refund_unclaimed", () => {
     expect(lamportsAfter - lamportsBefore).to.equal(
       escrowRent + vaultRent - fee - accountRent
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// events
+// ---------------------------------------------------------------------------
+
+describeLocal("events", () => {
+  const organizer = web3.Keypair.generate();
+  const judges = [web3.Keypair.generate(), web3.Keypair.generate()];
+  const judgeKeys = [judges[0].publicKey, judges[1].publicKey];
+  const winner = web3.Keypair.generate();
+
+  let mint: web3.PublicKey;
+
+  before(async () => {
+    await fund(organizer.publicKey, web3.LAMPORTS_PER_SOL);
+    for (const judge of judges) {
+      await fund(judge.publicKey, FEE_LAMPORTS);
+    }
+    // Enough for fees and for the rent of the token account a claim creates.
+    await fund(winner.publicKey, FEE_LAMPORTS);
+
+    mint = await createTestMint(TOKEN_PROGRAM_ID);
+    await fundTokens(
+      organizer.publicKey,
+      mint,
+      TOKEN_PROGRAM_ID,
+      10_000 * ONE_TOKEN
+    );
+  });
+
+  it("emits BountyCreated when a bounty is created", async () => {
+    const { escrow, bountyId, signature } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      tierAmounts: [300 * ONE_TOKEN, 100 * ONE_TOKEN],
+    });
+
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["bountyCreated"]);
+
+    const created = events[0].data;
+    expect(created.escrow.toBase58()).to.equal(escrow.toBase58());
+    expect(created.bountyId.toNumber()).to.equal(bountyId);
+    expect(created.organizer.toBase58()).to.equal(
+      organizer.publicKey.toBase58()
+    );
+    expect(created.mint.toBase58()).to.equal(mint.toBase58());
+    expect(created.prizeTotal.toNumber()).to.equal(400 * ONE_TOKEN);
+  });
+
+  it("emits VoteCast, then TierFinalized for the vote that decides the tier", async () => {
+    const candidate = web3.Keypair.generate().publicKey;
+    const { escrow, bountyId } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 2,
+      tierAmounts: [300 * ONE_TOKEN],
+    });
+
+    // The first vote does not decide the tier, so it emits only VoteCast.
+    const firstVote = await castVote(judges[0], escrow, 0, candidate);
+    const firstEvents = await eventsOf(firstVote);
+    expect(eventNames(firstEvents)).to.deep.equal(["voteCast"]);
+
+    const firstCast = firstEvents[0].data;
+    expect(firstCast.escrow.toBase58()).to.equal(escrow.toBase58());
+    expect(firstCast.bountyId.toNumber()).to.equal(bountyId);
+    expect(firstCast.tier).to.equal(0);
+    expect(firstCast.judge.toBase58()).to.equal(judgeKeys[0].toBase58());
+    expect(firstCast.candidate.toBase58()).to.equal(candidate.toBase58());
+
+    // The second vote reaches the threshold, so TierFinalized follows its
+    // VoteCast in the same transaction.
+    const secondVote = await castVote(judges[1], escrow, 0, candidate);
+    const secondEvents = await eventsOf(secondVote);
+    expect(eventNames(secondEvents)).to.deep.equal([
+      "voteCast",
+      "tierFinalized",
+    ]);
+
+    const secondCast = secondEvents[0].data;
+    expect(secondCast.judge.toBase58()).to.equal(judgeKeys[1].toBase58());
+    expect(secondCast.candidate.toBase58()).to.equal(candidate.toBase58());
+
+    const finalized = secondEvents[1].data;
+    expect(finalized.escrow.toBase58()).to.equal(escrow.toBase58());
+    expect(finalized.bountyId.toNumber()).to.equal(bountyId);
+    expect(finalized.tier).to.equal(0);
+    expect(finalized.winner.toBase58()).to.equal(candidate.toBase58());
+    expect(finalized.amount.toNumber()).to.equal(300 * ONE_TOKEN);
+  });
+
+  it("emits PrizeClaimed for each claim and marks the claim that closes the bounty", async () => {
+    const { escrow, bountyId } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      threshold: 1,
+      tierAmounts: [300 * ONE_TOKEN, 100 * ONE_TOKEN],
+    });
+    await castVote(judges[0], escrow, 0, winner.publicKey);
+    await castVote(judges[0], escrow, 1, winner.publicKey);
+
+    const firstClaim = await claimPrize(winner, escrow, 0);
+    const firstEvents = await eventsOf(firstClaim);
+    expect(eventNames(firstEvents)).to.deep.equal(["prizeClaimed"]);
+
+    const first = firstEvents[0].data;
+    expect(first.escrow.toBase58()).to.equal(escrow.toBase58());
+    expect(first.bountyId.toNumber()).to.equal(bountyId);
+    expect(first.tier).to.equal(0);
+    expect(first.winner.toBase58()).to.equal(winner.publicKey.toBase58());
+    expect(first.amount.toNumber()).to.equal(300 * ONE_TOKEN);
+    expect(first.bountyClosed).to.equal(false);
+
+    // The last tier's claim closes the escrow and the vault.
+    const finalClaim = await claimPrize(winner, escrow, 1);
+    const finalEvents = await eventsOf(finalClaim);
+    expect(eventNames(finalEvents)).to.deep.equal(["prizeClaimed"]);
+
+    const last = finalEvents[0].data;
+    expect(last.tier).to.equal(1);
+    expect(last.amount.toNumber()).to.equal(100 * ONE_TOKEN);
+    expect(last.bountyClosed).to.equal(true);
+    expect(await connection.getAccountInfo(escrow)).to.equal(null);
+  });
+
+  it("emits BountyRefunded with the amount returned to the organizer", async () => {
+    const deadline = (await chainNow()) + 60;
+    const claimDeadline = deadline + MIN_CLAIM_WINDOW;
+    const { escrow, bountyId } = await createBounty(organizer, {
+      mint,
+      judges: judgeKeys,
+      tierAmounts: [300 * ONE_TOKEN, 100 * ONE_TOKEN],
+      deadline,
+      claimDeadline,
+    });
+    await advanceClockPast(claimDeadline);
+
+    const signature = await refundUnclaimed(organizer, escrow, mint);
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["bountyRefunded"]);
+
+    const refunded = events[0].data;
+    expect(refunded.escrow.toBase58()).to.equal(escrow.toBase58());
+    expect(refunded.bountyId.toNumber()).to.equal(bountyId);
+    expect(refunded.organizer.toBase58()).to.equal(
+      organizer.publicKey.toBase58()
+    );
+    expect(refunded.amount.toNumber()).to.equal(400 * ONE_TOKEN);
   });
 });

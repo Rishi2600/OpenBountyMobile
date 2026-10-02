@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::constants::*;
 use crate::error::ErrorCode;
+use crate::events::{TierFinalized, VoteCast};
 use crate::state::{Escrow, TierVote};
 
 #[derive(Accounts)]
@@ -26,6 +27,7 @@ pub struct VoteWinner<'info> {
 
 pub fn handle_vote_winner(ctx: Context<VoteWinner>, tier: u8, candidate: Pubkey) -> Result<()> {
     let judge = ctx.accounts.judge.key();
+    let escrow_key = ctx.accounts.escrow.key();
     let escrow = &mut ctx.accounts.escrow;
 
     // Checked before anything else is read, so an account written with a
@@ -46,6 +48,7 @@ pub fn handle_vote_winner(ctx: Context<VoteWinner>, tier: u8, candidate: Pubkey)
     // Read before borrowing the tier mutably, because that borrow holds the
     // whole escrow until the end of the function.
     let threshold = escrow.threshold as usize;
+    let bounty_id = escrow.bounty_id;
 
     let prize_tier = &mut escrow.tiers[tier_index];
     require!(!prize_tier.is_finalized(), ErrorCode::TierAlreadyFinalized);
@@ -53,11 +56,27 @@ pub fn handle_vote_winner(ctx: Context<VoteWinner>, tier: u8, candidate: Pubkey)
 
     prize_tier.votes.push(TierVote { judge, candidate });
 
+    emit!(VoteCast {
+        escrow: escrow_key,
+        bounty_id,
+        tier,
+        judge,
+        candidate,
+    });
+
     // The vote that brings a candidate to the threshold finalizes the tier
     // right away, so there is no separate finalize instruction. Once `winner`
     // is set, the checks above reject any further votes on this tier.
     if prize_tier.count_votes_for(&candidate) >= threshold {
         prize_tier.winner = Some(candidate);
+
+        emit!(TierFinalized {
+            escrow: escrow_key,
+            bounty_id,
+            tier,
+            winner: candidate,
+            amount: prize_tier.amount,
+        });
     }
 
     Ok(())
