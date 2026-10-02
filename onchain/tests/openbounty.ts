@@ -2102,3 +2102,91 @@ describeLocal("events", () => {
     expect(refunded.amount.toNumber()).to.equal(400 * ONE_TOKEN);
   });
 });
+
+// ---------------------------------------------------------------------------
+// devnet smoke
+// ---------------------------------------------------------------------------
+
+// One full lifecycle against the deployed program: create a token bounty, vote
+// to finalize a tier, claim. It is skipped unless OPENBOUNTY_DEVNET=1, and with
+// that flag it is the only block that runs. It needs no time travel, so it
+// also runs unchanged on local Surfpool. To run it against devnet:
+//
+//   OPENBOUNTY_DEVNET=1 \
+//   ANCHOR_PROVIDER_URL=https://api.devnet.solana.com \
+//   ANCHOR_WALLET=$HOME/.config/solana/id.json \
+//   yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/openbounty.ts
+//
+// Every read uses "confirmed", so a public RPC node that lags slightly behind
+// cannot fail it.
+describeDevnet("devnet smoke", () => {
+  const organizer = web3.Keypair.generate();
+  const judges = [web3.Keypair.generate(), web3.Keypair.generate()];
+  const winner = web3.Keypair.generate();
+
+  // 50 tokens of a test mint, so the run costs only SOL for rent and fees.
+  const PRIZE = 50 * ONE_TOKEN;
+
+  let mint: web3.PublicKey;
+
+  before(async () => {
+    // The rent of the profile, escrow and vault (about 0.013 SOL on devnet,
+    // more locally) plus fees. The escrow and vault rent comes back when the
+    // claim closes the bounty.
+    await fund(organizer.publicKey, 25_000_000);
+    for (const judge of judges) {
+      await fund(judge.publicKey, FEE_LAMPORTS);
+    }
+    // Enough for fees and for the rent of the token account the claim creates.
+    await fund(winner.publicKey, FEE_LAMPORTS);
+
+    mint = await createTestMint(TOKEN_PROGRAM_ID);
+    await fundTokens(organizer.publicKey, mint, TOKEN_PROGRAM_ID, PRIZE);
+  });
+
+  it("creates a token bounty, finalizes a tier by vote, and pays the winner", async () => {
+    const created = await createBounty(organizer, {
+      title: "OpenBounty v2 Smoke Test",
+      mint,
+      judges: [judges[0].publicKey, judges[1].publicKey],
+      threshold: 2,
+      tierAmounts: [PRIZE],
+    });
+    const escrow = created.escrow;
+    const vault = created.vault;
+    expect(await tokenBalance(vault)).to.equal(PRIZE);
+
+    const firstVote = await castVote(judges[0], escrow, 0, winner.publicKey);
+    const secondVote = await castVote(judges[1], escrow, 0, winner.publicKey);
+
+    const account = await program.account.escrow.fetch(escrow, "confirmed");
+    expect(account.version).to.equal(2);
+    expect(account.tiers[0].winner?.toBase58()).to.equal(
+      winner.publicKey.toBase58()
+    );
+
+    const claim = await claimPrize(winner, escrow, 0);
+
+    // The winner is paid the prize, and because this was the only tier the
+    // claim also closed both accounts.
+    const winnerAccount = getAssociatedTokenAddressSync(mint, winner.publicKey);
+    expect(await tokenBalance(winnerAccount)).to.equal(PRIZE);
+    expect(await connection.getAccountInfo(escrow, "confirmed")).to.equal(null);
+    expect(await connection.getAccountInfo(vault, "confirmed")).to.equal(null);
+
+    const claimEvents = await eventsOf(claim);
+    expect(eventNames(claimEvents)).to.deep.equal(["prizeClaimed"]);
+    expect(claimEvents[0].data.bountyClosed).to.equal(true);
+
+    console.log("      organizer:     " + organizer.publicKey.toBase58());
+    console.log("      mint:          " + mint.toBase58());
+    console.log("      bounty id:     " + created.bountyId);
+    console.log("      escrow:        " + escrow.toBase58());
+    console.log("      vault:         " + vault.toBase58());
+    console.log("      winner:        " + winner.publicKey.toBase58());
+    console.log("      create bounty: " + created.signature);
+    console.log("      first vote:    " + firstVote);
+    console.log("      second vote:   " + secondVote);
+    console.log("      claim prize:   " + claim);
+  });
+});
