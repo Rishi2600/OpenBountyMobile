@@ -4,7 +4,9 @@
 pub mod close_entry;
 pub mod initialize;
 pub mod submit_entry;
+pub mod vote;
 
 pub use close_entry::*;
 pub use initialize::*;
 pub use submit_entry::*;
+pub use vote::*;

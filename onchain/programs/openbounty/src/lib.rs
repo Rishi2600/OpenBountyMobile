@@ -27,6 +27,12 @@ pub mod openbounty {
         instructions::initialize::handle_initialize_escrow(ctx, params)
     }
 
+    // A judge votes for a candidate on one prize tier. The tier is decided
+    // when a candidate reaches the vote threshold.
+    pub fn vote_winner(ctx: Context<VoteWinner>, tier_index: u8, candidate: Pubkey) -> Result<()> {
+        instructions::vote::handle_vote_winner(ctx, tier_index, candidate)
+    }
+
     // A builder enters a bounty before its entries close.
     pub fn submit_entry(
         ctx: Context<SubmitEntry>,

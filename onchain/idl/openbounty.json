@@ -274,6 +274,64 @@
           "type": "string"
         }
       ]
+    },
+    {
+      "name": "vote_winner",
+      "discriminator": [
+        44,
+        247,
+        50,
+        25,
+        60,
+        91,
+        248,
+        84
+      ],
+      "accounts": [
+        {
+          "name": "judge",
+          "signer": true
+        },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.organizer",
+                "account": "Escrow"
+              },
+              {
+                "kind": "account",
+                "path": "escrow.bounty_id",
+                "account": "Escrow"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "tier_index",
+          "type": "u8"
+        },
+        {
+          "name": "candidate",
+          "type": "pubkey"
+        }
+      ]
     }
   ],
   "accounts": [

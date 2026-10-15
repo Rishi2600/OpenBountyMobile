@@ -1144,3 +1144,218 @@ describeLocal("submit_entry and close_entry", () => {
     expect(after - before).to.equal(rent - fee);
   });
 });
+
+// ---------------------------------------------------------------------------
+// vote_winner
+// ---------------------------------------------------------------------------
+
+async function voteWinner(
+  judge: web3.Keypair,
+  escrow: web3.PublicKey,
+  tierIndex: number,
+  candidate: web3.PublicKey
+): Promise<string> {
+  return programFor(judge)
+    .methods.voteWinner(tierIndex, candidate)
+    .accountsPartial({ judge: judge.publicKey, escrow })
+    .rpc();
+}
+
+// Judges only sign and pay fees.
+async function newJudges(count: number): Promise<web3.Keypair[]> {
+  const judges: web3.Keypair[] = [];
+  for (let i = 0; i < count; i++) {
+    judges.push(await newFundedWallet(FEE_LAMPORTS));
+  }
+  return judges;
+}
+
+function publicKeysOf(wallets: web3.Keypair[]): web3.PublicKey[] {
+  const keys: web3.PublicKey[] = [];
+  for (const wallet of wallets) {
+    keys.push(wallet.publicKey);
+  }
+  return keys;
+}
+
+async function fetchTier(escrow: web3.PublicKey, tierIndex: number) {
+  const account = await program.account.escrow.fetch(escrow);
+  return account.prizeTiers[tierIndex];
+}
+
+describeLocal("vote_winner", () => {
+  let organizer: web3.Keypair;
+  let judges: web3.Keypair[];
+  // Three judges, so two matching votes decide a tier.
+  let bounty: Bounty;
+  let alice: web3.PublicKey;
+  let bob: web3.PublicKey;
+
+  before(async () => {
+    organizer = await newFundedWallet(ORGANIZER_LAMPORTS);
+    judges = await newJudges(3);
+    bounty = await createBounty(organizer, { judges: publicKeysOf(judges) });
+    alice = web3.Keypair.generate().publicKey;
+    bob = web3.Keypair.generate().publicKey;
+  });
+
+  it("rejects the organizer and anyone who is not a judge", async () => {
+    await expectError(
+      voteWinner(organizer, bounty.escrow, 0, alice),
+      "OrganizerCannotVote"
+    );
+    const stranger = await newFundedWallet(FEE_LAMPORTS);
+    await expectError(
+      voteWinner(stranger, bounty.escrow, 0, alice),
+      "UnauthorizedJudge"
+    );
+    expect((await fetchTier(bounty.escrow, 0)).votes.length).to.equal(0);
+  });
+
+  it("rejects a tier that does not exist", async () => {
+    await expectError(
+      voteWinner(judges[0], bounty.escrow, 2, alice),
+      "InvalidTier"
+    );
+  });
+
+  it("rejects ineligible candidates", async () => {
+    const ineligible = [
+      organizer.publicKey,
+      judges[0].publicKey,
+      judges[2].publicKey,
+      web3.PublicKey.default,
+      bounty.escrow,
+      bounty.vault,
+    ];
+    for (const candidate of ineligible) {
+      await expectError(
+        voteWinner(judges[0], bounty.escrow, 0, candidate),
+        "InvalidCandidate"
+      );
+    }
+    expect((await fetchTier(bounty.escrow, 0)).votes.length).to.equal(0);
+  });
+
+  it("records a vote without deciding the tier below the threshold", async () => {
+    await voteWinner(judges[0], bounty.escrow, 0, alice);
+    const tier = await fetchTier(bounty.escrow, 0);
+    expect(tier.votes.length).to.equal(1);
+    expect(tier.votes[0].judge.toBase58()).to.equal(
+      judges[0].publicKey.toBase58()
+    );
+    expect(tier.votes[0].candidate.toBase58()).to.equal(alice.toBase58());
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("makes votes final: a judge can't vote twice on a tier", async () => {
+    await expectError(
+      voteWinner(judges[0], bounty.escrow, 0, bob),
+      "DuplicateVote"
+    );
+    const tier = await fetchTier(bounty.escrow, 0);
+    expect(tier.votes.length).to.equal(1);
+    expect(tier.votes[0].candidate.toBase58()).to.equal(alice.toBase58());
+  });
+
+  it("decides the tier when a candidate reaches the threshold", async () => {
+    await voteWinner(judges[1], bounty.escrow, 0, alice);
+    const tier = await fetchTier(bounty.escrow, 0);
+    expect(tier.votes.length).to.equal(2);
+    expect(tier.winner?.toBase58()).to.equal(alice.toBase58());
+    expect(tier.claimed).to.equal(false);
+    // The other tier is untouched.
+    expect((await fetchTier(bounty.escrow, 1)).votes.length).to.equal(0);
+  });
+
+  it("rejects votes on a decided tier", async () => {
+    await expectError(
+      voteWinner(judges[2], bounty.escrow, 0, bob),
+      "TierAlreadyFinalized"
+    );
+    expect((await fetchTier(bounty.escrow, 0)).votes.length).to.equal(2);
+  });
+
+  it("leaves a tier undecided when the votes split", async () => {
+    await voteWinner(judges[0], bounty.escrow, 1, alice);
+    await voteWinner(judges[1], bounty.escrow, 1, bob);
+    await voteWinner(
+      judges[2],
+      bounty.escrow,
+      1,
+      web3.Keypair.generate().publicKey
+    );
+    const tier = await fetchTier(bounty.escrow, 1);
+    expect(tier.votes.length).to.equal(3);
+    expect(tier.winner).to.equal(null);
+  });
+
+  it("lets one wallet win several tiers, with or without an entry", async () => {
+    const other = await createBounty(organizer, {
+      judges: publicKeysOf(judges),
+    });
+    // Carol never submitted an entry.
+    const carol = web3.Keypair.generate().publicKey;
+    for (const tierIndex of [0, 1]) {
+      await voteWinner(judges[0], other.escrow, tierIndex, carol);
+      await voteWinner(judges[2], other.escrow, tierIndex, carol);
+    }
+    expect((await fetchTier(other.escrow, 0)).winner?.toBase58()).to.equal(
+      carol.toBase58()
+    );
+    expect((await fetchTier(other.escrow, 1)).winner?.toBase58()).to.equal(
+      carol.toBase58()
+    );
+  });
+
+  it("fills every vote slot of the largest bounty within its fixed size", async () => {
+    const fiveJudges = await newJudges(5);
+    const largest = await createBounty(organizer, {
+      judges: publicKeysOf(fiveJudges),
+      title: "t".repeat(50),
+      metadataUri: "u".repeat(100),
+      prizeAmounts: [
+        new BN(MIN_PRIZE_AMOUNT),
+        new BN(MIN_PRIZE_AMOUNT),
+        new BN(MIN_PRIZE_AMOUNT),
+        new BN(MIN_PRIZE_AMOUNT),
+      ],
+    });
+    // Every judge names a different candidate, so no tier is decided and
+    // every tier ends up with all five votes.
+    for (let tierIndex = 0; tierIndex < 4; tierIndex++) {
+      for (const judge of fiveJudges) {
+        await voteWinner(
+          judge,
+          largest.escrow,
+          tierIndex,
+          web3.Keypair.generate().publicKey
+        );
+      }
+    }
+    const info = await connection.getAccountInfo(largest.escrow);
+    expect(info?.data.length).to.equal(ESCROW_SIZE);
+    const escrow = await program.account.escrow.fetch(largest.escrow);
+    for (const tier of escrow.prizeTiers) {
+      expect(tier.votes.length).to.equal(5);
+      expect(tier.winner).to.equal(null);
+    }
+    expect(escrow.title).to.equal("t".repeat(50));
+  });
+
+  it("closes voting after the deadline", async () => {
+    await advanceClockPast(bounty.params.deadline);
+    // Tier 1 is still undecided, but the vote is too late.
+    const late = await createBounty(organizer, {
+      judges: publicKeysOf(judges),
+    });
+    await expectError(
+      voteWinner(judges[0], bounty.escrow, 1, alice),
+      "VotingClosed"
+    );
+    expect((await fetchTier(bounty.escrow, 1)).votes.length).to.equal(3);
+    // A bounty whose deadline is still ahead keeps taking votes.
+    await voteWinner(judges[0], late.escrow, 0, alice);
+    expect((await fetchTier(late.escrow, 0)).votes.length).to.equal(1);
+  });
+});
