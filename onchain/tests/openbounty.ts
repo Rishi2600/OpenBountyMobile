@@ -1,4 +1,5 @@
 import * as anchor from "@anchor-lang/core";
+import * as fs from "fs";
 import { BN, Program, web3 } from "@anchor-lang/core";
 import { expect } from "chai";
 import { Openbounty } from "../target/types/openbounty";
@@ -1742,5 +1743,197 @@ describeLocal("claim_prize and refund_unclaimed", () => {
       expect(await connection.getAccountInfo(untouched.escrow)).to.equal(null);
       expect(await lamportsOf(untouched.vault)).to.equal(0);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// events
+// ---------------------------------------------------------------------------
+
+// Finds the one event with this name in a transaction's events.
+function eventNamed(events: anchor.Event[], name: string): anchor.Event {
+  for (const event of events) {
+    if (event.name === name) {
+      return event;
+    }
+  }
+  throw new Error("No " + name + " event in " + eventNames(events).join(", "));
+}
+
+function expectKey(actual: web3.PublicKey, expected: web3.PublicKey) {
+  expect(actual.toBase58()).to.equal(expected.toBase58());
+}
+
+describeLocal("events", () => {
+  let organizer: web3.Keypair;
+  let judges: web3.Keypair[];
+  let winner: web3.Keypair;
+  let builder: web3.Keypair;
+  // Tier 0 is claimed, tier 1's winner never claims, tier 2 never gets a
+  // winner.
+  let bounty: Bounty;
+
+  before(async () => {
+    organizer = await newFundedWallet(ORGANIZER_LAMPORTS);
+    judges = await newJudges(3);
+    winner = await newFundedWallet(FEE_LAMPORTS);
+    builder = await newFundedWallet(BUILDER_LAMPORTS);
+  });
+
+  it("emits EscrowInitialized on create", async () => {
+    bounty = await createBounty(organizer, {
+      judges: publicKeysOf(judges),
+      prizeAmounts: [
+        new BN(3 * MIN_PRIZE_AMOUNT),
+        new BN(2 * MIN_PRIZE_AMOUNT),
+        new BN(MIN_PRIZE_AMOUNT),
+      ],
+    });
+    const events = await eventsOf(bounty.signature);
+    expect(eventNames(events)).to.deep.equal(["escrowInitialized"]);
+    const data = events[0].data;
+    expectKey(data.escrow, bounty.escrow);
+    expectKey(data.organizer, organizer.publicKey);
+    expect(data.bountyId.toNumber()).to.equal(bounty.bountyId);
+    expect(data.prizePool.toNumber()).to.equal(6 * MIN_PRIZE_AMOUNT);
+    expect(data.submissionsDeadline.toNumber()).to.equal(
+      bounty.params.submissionsDeadline
+    );
+    expect(data.deadline.toNumber()).to.equal(bounty.params.deadline);
+    expect(data.claimDeadline.toNumber()).to.equal(
+      bounty.params.deadline + MIN_CLAIM_WINDOW
+    );
+  });
+
+  it("emits EntrySubmitted on submit_entry", async () => {
+    const signature = await submitEntry(builder, bounty.escrow, DEFAULT_ENTRY);
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["entrySubmitted"]);
+    const data = events[0].data;
+    expectKey(data.escrow, bounty.escrow);
+    expectKey(
+      data.submission,
+      submissionPda(bounty.escrow, builder.publicKey)[0]
+    );
+    expectKey(data.submitter, builder.publicKey);
+  });
+
+  it("emits VoteCast for a vote below the threshold", async () => {
+    const signature = await voteWinner(
+      judges[0],
+      bounty.escrow,
+      0,
+      winner.publicKey
+    );
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["voteCast"]);
+    const data = events[0].data;
+    expectKey(data.escrow, bounty.escrow);
+    expect(data.tierIndex).to.equal(0);
+    expectKey(data.judge, judges[0].publicKey);
+    expectKey(data.candidate, winner.publicKey);
+  });
+
+  it("emits VoteCast then TierFinalized for the deciding vote", async () => {
+    const signature = await voteWinner(
+      judges[1],
+      bounty.escrow,
+      0,
+      winner.publicKey
+    );
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["voteCast", "tierFinalized"]);
+    expectKey(events[0].data.judge, judges[1].publicKey);
+    const data = eventNamed(events, "tierFinalized").data;
+    expectKey(data.escrow, bounty.escrow);
+    expect(data.tierIndex).to.equal(0);
+    expectKey(data.winner, winner.publicKey);
+  });
+
+  it("emits PrizeClaimed alone while other tiers are open", async () => {
+    const signature = await claimPrize(winner, bounty, 0, organizer.publicKey);
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["prizeClaimed"]);
+    const data = events[0].data;
+    expectKey(data.escrow, bounty.escrow);
+    expect(data.tierIndex).to.equal(0);
+    expectKey(data.winner, winner.publicKey);
+    expect(data.amount.toNumber()).to.equal(3 * MIN_PRIZE_AMOUNT);
+  });
+
+  it("emits PrizeClaimed then EscrowClosed for the claim that settles a bounty", async () => {
+    const single = await createBounty(organizer, {
+      judges: publicKeysOf(judges),
+      prizeAmounts: [new BN(MIN_PRIZE_AMOUNT)],
+    });
+    await decideTier(judges, single, 0, winner.publicKey);
+    const signature = await claimPrize(winner, single, 0, organizer.publicKey);
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["prizeClaimed", "escrowClosed"]);
+    expectKey(eventNamed(events, "escrowClosed").data.escrow, single.escrow);
+  });
+
+  it("emits TierRefunded alone while other tiers are open", async () => {
+    await decideTier(judges, bounty, 1, winner.publicKey);
+    await advanceClockPast(bounty.params.deadline);
+    const signature = await refundUnclaimed(organizer, bounty, 2);
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["tierRefunded"]);
+    const data = events[0].data;
+    expectKey(data.escrow, bounty.escrow);
+    expect(data.tierIndex).to.equal(2);
+    expect(data.amount.toNumber()).to.equal(MIN_PRIZE_AMOUNT);
+  });
+
+  it("emits TierRefunded then EscrowClosed for the refund that settles a bounty", async () => {
+    await advanceClockPast(bounty.params.deadline + MIN_CLAIM_WINDOW);
+    const signature = await refundUnclaimed(organizer, bounty, 1);
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["tierRefunded", "escrowClosed"]);
+    expect(eventNamed(events, "tierRefunded").data.amount.toNumber()).to.equal(
+      2 * MIN_PRIZE_AMOUNT
+    );
+    expectKey(eventNamed(events, "escrowClosed").data.escrow, bounty.escrow);
+  });
+
+  it("emits EntryClosed on close_entry", async () => {
+    const [entry] = submissionPda(bounty.escrow, builder.publicKey);
+    const signature = await closeEntry(builder, entry);
+    const events = await eventsOf(signature);
+    expect(eventNames(events)).to.deep.equal(["entryClosed"]);
+    const data = events[0].data;
+    expectKey(data.escrow, bounty.escrow);
+    expectKey(data.submission, entry);
+    expectKey(data.submitter, builder.publicKey);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IDL
+// ---------------------------------------------------------------------------
+
+describeLocal("IDL", () => {
+  it("is committed in idl/ exactly as the build produced it", () => {
+    // The mobile app generates its client from the committed copy, so a stale
+    // copy would give the app the wrong interface.
+    const committed = fs.readFileSync("idl/openbounty.json", "utf8");
+    const built = fs.readFileSync("target/idl/openbounty.json", "utf8");
+    expect(committed).to.equal(built);
+  });
+
+  it("exposes the six instructions", () => {
+    const names: string[] = [];
+    for (const instruction of program.idl.instructions) {
+      names.push(instruction.name);
+    }
+    names.sort();
+    expect(names).to.deep.equal([
+      "claimPrize",
+      "closeEntry",
+      "initializeEscrow",
+      "refundUnclaimed",
+      "submitEntry",
+      "voteWinner",
+    ]);
   });
 });
