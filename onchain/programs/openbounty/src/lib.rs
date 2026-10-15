@@ -3,6 +3,7 @@ pub mod error;
 pub mod events;
 pub mod instructions;
 pub mod state;
+pub mod vault;
 
 use anchor_lang::prelude::*;
 
@@ -31,6 +32,18 @@ pub mod openbounty {
     // when a candidate reaches the vote threshold.
     pub fn vote_winner(ctx: Context<VoteWinner>, tier_index: u8, candidate: Pubkey) -> Result<()> {
         instructions::vote::handle_vote_winner(ctx, tier_index, candidate)
+    }
+
+    // The winner of a decided tier claims its prize, until the claim window
+    // ends.
+    pub fn claim_prize(ctx: Context<ClaimPrize>, tier_index: u8) -> Result<()> {
+        instructions::claim::handle_claim_prize(ctx, tier_index)
+    }
+
+    // The organizer takes back a tier that never got a winner (after the
+    // deadline) or whose winner did not claim (after the claim window).
+    pub fn refund_unclaimed(ctx: Context<RefundUnclaimed>, tier_index: u8) -> Result<()> {
+        instructions::refund::handle_refund_unclaimed(ctx, tier_index)
     }
 
     // A builder enters a bounty before its entries close.

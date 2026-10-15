@@ -1,150 +1,86 @@
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::*;
-use crate::error::ErrorCode;
+use crate::error::OpenBountyError;
 use crate::events::PrizeClaimed;
 use crate::state::Escrow;
-use crate::vault::{close_vault, transfer_from_vault};
+use crate::vault::{close_if_settled, pay_from_vault};
 
 #[derive(Accounts)]
 pub struct ClaimPrize<'info> {
+    // Must be the tier's winner. Receives the prize.
+    #[account(mut)]
+    pub winner: Signer<'info>,
+
     #[account(
         mut,
-        seeds = [
-            ESCROW_SEED,
-            escrow.organizer.as_ref(),
-            &escrow.bounty_id.to_le_bytes()
-        ],
+        seeds = [ESCROW_SEED, escrow.organizer.as_ref(), &escrow.bounty_id.to_le_bytes()],
         bump = escrow.bump,
-        has_one = organizer @ ErrorCode::Unauthorized,
-        has_one = mint
+        has_one = organizer @ OpenBountyError::OrganizerMismatch
     )]
     pub escrow: Account<'info, Escrow>,
 
     #[account(
         mut,
-        seeds = [VAULT_SEED, escrow.key().as_ref()],
-        bump = escrow.vault_bump,
-        token::mint = mint,
-        token::authority = escrow,
-        token::token_program = token_program
+        seeds = [VAULT_SEED, escrow.organizer.as_ref(), &escrow.bounty_id.to_le_bytes()],
+        bump = escrow.vault_bump
     )]
-    pub vault: InterfaceAccount<'info, TokenAccount>,
+    pub vault: SystemAccount<'info>,
 
-    #[account(mint::token_program = token_program)]
-    pub mint: InterfaceAccount<'info, Mint>,
-
-    #[account(mut)]
-    pub winner: Signer<'info>,
-
-    // Always the winner's own associated token account, created here and paid
-    // for by the winner if they do not have one yet, so a prize can never be
-    // paid into an account someone else controls.
-    #[account(
-        init_if_needed,
-        payer = winner,
-        associated_token::mint = mint,
-        associated_token::authority = winner,
-        associated_token::token_program = token_program
-    )]
-    pub winner_token_account: InterfaceAccount<'info, TokenAccount>,
-
-    /// CHECK: Only receives the rent when the vault and escrow close. The
-    /// `has_one = organizer` constraint on `escrow` guarantees this is the
-    /// bounty's organizer, so a winner cannot redirect that rent to themselves.
+    // Not a signer. Receives the escrow's rent, and anything left in the
+    // vault, when this claim settles the last open tier. Its owner is
+    // deliberately not checked: a wallet can reassign itself to another
+    // program, and an owner check would let the organizer block every claim
+    // that way and then refund the prizes after the claim window.
+    /// CHECK: `has_one` on the escrow pins the address, and it is only credited.
     #[account(mut)]
     pub organizer: UncheckedAccount<'info>,
-
-    pub token_program: Interface<'info, TokenInterface>,
-
-    pub associated_token_program: Program<'info, AssociatedToken>,
 
     pub system_program: Program<'info, System>,
 }
 
-pub fn handle_claim_prize(ctx: Context<ClaimPrize>, tier: u8) -> Result<()> {
-    let claimant = ctx.accounts.winner.key();
+pub fn handle_claim_prize(ctx: Context<ClaimPrize>, tier_index: u8) -> Result<()> {
+    let winner = ctx.accounts.winner.key();
     let escrow_key = ctx.accounts.escrow.key();
-    let bounty_id = ctx.accounts.escrow.bounty_id;
-    let escrow = &mut ctx.accounts.escrow;
+    let now = Clock::get()?.unix_timestamp;
 
-    // Checked before anything else is read, so an account written with a
-    // different layout is rejected instead of being misread.
+    let escrow = &mut ctx.accounts.escrow;
+    let claim_deadline = escrow.claim_deadline;
+    let tier = escrow
+        .prize_tiers
+        .get_mut(tier_index as usize)
+        .ok_or(OpenBountyError::InvalidTier)?;
+    let tier_winner = tier.winner.ok_or(OpenBountyError::TierNotFinalized)?;
+    require!(tier_winner == winner, OpenBountyError::NotWinner);
+    require!(!tier.claimed, OpenBountyError::PrizeAlreadyClaimed);
+    // A winner's prize is theirs until the claim window ends, even before the
+    // deadline. A refunded winner tier means the window has already closed.
     require!(
-        escrow.version == ESCROW_VERSION,
-        ErrorCode::UnsupportedEscrowVersion
+        now <= claim_deadline && !tier.refunded,
+        OpenBountyError::ClaimWindowClosed
     );
 
-    // A winner can claim before or after voting closes, but only until the
-    // claim deadline. After it, the organizer may refund the tier instead.
-    let now = Clock::get()?.unix_timestamp;
-    require!(now <= escrow.claim_deadline, ErrorCode::ClaimDeadlinePassed);
+    tier.claimed = true;
+    let amount = tier.amount;
 
-    let tier_index = tier as usize;
-    require!(tier_index < escrow.tiers.len(), ErrorCode::InvalidTierIndex);
-
-    let prize_tier = &mut escrow.tiers[tier_index];
-    require!(prize_tier.is_finalized(), ErrorCode::TierNotFinalized);
-    require!(!prize_tier.claimed, ErrorCode::TierAlreadyClaimed);
-    require!(prize_tier.winner == Some(claimant), ErrorCode::NotWinner);
-
-    // Marked before any tokens move, the same order refund uses. The
-    // transaction is atomic, so if the transfer fails this flag is rolled
-    // back with it.
-    let amount = prize_tier.amount;
-    prize_tier.claimed = true;
-
-    let is_final_claim = escrow.all_tiers_claimed();
-
-    // On the final claim the winner also receives anything else in the vault,
-    // such as tokens someone sent to it directly. The token program only
-    // closes an empty account, so leaving them would stop the bounty closing.
-    // `vault.amount` was read before this instruction moved anything, so it
-    // is the vault's whole balance.
-    let mut payout = amount;
-    if is_final_claim {
-        payout = ctx.accounts.vault.amount;
-    }
-
-    transfer_from_vault(
-        &ctx.accounts.vault,
-        &ctx.accounts.mint,
-        &ctx.accounts.winner_token_account,
+    pay_from_vault(
         &ctx.accounts.escrow,
-        &ctx.accounts.token_program,
-        payout,
+        &ctx.accounts.vault,
+        ctx.accounts.winner.to_account_info(),
+        &ctx.accounts.system_program,
+        amount,
     )?;
-
     emit!(PrizeClaimed {
         escrow: escrow_key,
-        bounty_id,
-        tier,
-        winner: claimant,
-        amount: payout,
-        bounty_closed: is_final_claim,
+        tier_index,
+        winner,
+        amount,
     });
 
-    // Anchor's `close` constraint would close on every claim, but the accounts
-    // may only close once every tier is paid out, so the close is done here by
-    // hand.
-    if !is_final_claim {
-        return Ok(());
-    }
-
-    close_vault(
+    close_if_settled(
+        &mut ctx.accounts.escrow,
         &ctx.accounts.vault,
         ctx.accounts.organizer.to_account_info(),
-        &ctx.accounts.escrow,
-        &ctx.accounts.token_program,
-    )?;
-
-    // Done last: this moves the escrow's rent to the organizer and wipes its
-    // data, so the escrow must not be read or written after this.
-    ctx.accounts
-        .escrow
-        .close(ctx.accounts.organizer.to_account_info())?;
-
-    Ok(())
+        &ctx.accounts.system_program,
+    )
 }

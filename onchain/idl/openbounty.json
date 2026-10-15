@@ -8,6 +8,100 @@
   },
   "instructions": [
     {
+      "name": "claim_prize",
+      "discriminator": [
+        157,
+        233,
+        139,
+        121,
+        246,
+        62,
+        234,
+        235
+      ],
+      "accounts": [
+        {
+          "name": "winner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.organizer",
+                "account": "Escrow"
+              },
+              {
+                "kind": "account",
+                "path": "escrow.bounty_id",
+                "account": "Escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.organizer",
+                "account": "Escrow"
+              },
+              {
+                "kind": "account",
+                "path": "escrow.bounty_id",
+                "account": "Escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "organizer",
+          "writable": true,
+          "relations": [
+            "escrow"
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "tier_index",
+          "type": "u8"
+        }
+      ]
+    },
+    {
       "name": "close_entry",
       "discriminator": [
         132,
@@ -175,6 +269,96 @@
               "name": "InitializeEscrowParams"
             }
           }
+        }
+      ]
+    },
+    {
+      "name": "refund_unclaimed",
+      "discriminator": [
+        126,
+        143,
+        204,
+        210,
+        179,
+        143,
+        2,
+        231
+      ],
+      "accounts": [
+        {
+          "name": "organizer",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "escrow"
+          ]
+        },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.organizer",
+                "account": "Escrow"
+              },
+              {
+                "kind": "account",
+                "path": "escrow.bounty_id",
+                "account": "Escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.organizer",
+                "account": "Escrow"
+              },
+              {
+                "kind": "account",
+                "path": "escrow.bounty_id",
+                "account": "Escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "tier_index",
+          "type": "u8"
         }
       ]
     },

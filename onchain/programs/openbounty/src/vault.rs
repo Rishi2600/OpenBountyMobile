@@ -1,71 +1,64 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{
-    self, CloseAccount, Mint, TokenAccount, TokenInterface, TransferChecked,
-};
+use anchor_lang::system_program::{transfer, Transfer};
 
-use crate::constants::ESCROW_SEED;
+use crate::constants::VAULT_SEED;
+use crate::events::EscrowClosed;
 use crate::state::Escrow;
 
-// The vault is a token account whose authority is the escrow. Only this
-// program can sign as the escrow, by supplying the escrow's seeds, so these
-// two functions are the only way tokens or rent ever leave a vault.
+// The vault is a data-less system account at a PDA of this program. Only this
+// program can sign for it, by supplying its seeds, so these two functions are
+// the only way lamports ever leave a vault. Shared by claim_prize and
+// refund_unclaimed.
 
-// Moves `amount` tokens from the vault to `to`.
-pub fn transfer_from_vault<'info>(
-    vault: &InterfaceAccount<'info, TokenAccount>,
-    mint: &InterfaceAccount<'info, Mint>,
-    to: &InterfaceAccount<'info, TokenAccount>,
+// Moves `amount` lamports from the vault to `to`.
+pub fn pay_from_vault<'info>(
     escrow: &Account<'info, Escrow>,
-    token_program: &Interface<'info, TokenInterface>,
+    vault: &SystemAccount<'info>,
+    to: AccountInfo<'info>,
+    system_program: &Program<'info, System>,
     amount: u64,
 ) -> Result<()> {
     let organizer = escrow.organizer;
     let bounty_id_bytes = escrow.bounty_id.to_le_bytes();
-    let bump_bytes = [escrow.bump];
-    let escrow_seeds: &[&[u8]] = &[
-        ESCROW_SEED,
+    let vault_bump = [escrow.vault_bump];
+    let vault_seeds: &[&[u8]] = &[
+        VAULT_SEED,
         organizer.as_ref(),
         &bounty_id_bytes,
-        &bump_bytes,
+        &vault_bump,
     ];
-    let signer_seeds: &[&[&[u8]]] = &[escrow_seeds];
+    let signer_seeds: &[&[&[u8]]] = &[vault_seeds];
 
-    let transfer_accounts = TransferChecked {
+    let transfer_accounts = Transfer {
         from: vault.to_account_info(),
-        mint: mint.to_account_info(),
-        to: to.to_account_info(),
-        authority: escrow.to_account_info(),
+        to,
     };
     let transfer_context =
-        CpiContext::new_with_signer(token_program.key(), transfer_accounts, signer_seeds);
-    token_interface::transfer_checked(transfer_context, amount, mint.decimals)
+        CpiContext::new_with_signer(system_program.key(), transfer_accounts, signer_seeds);
+    transfer(transfer_context, amount)
 }
 
-// Closes the vault and sends its rent to `destination`. The token program
-// only closes an empty token account, so the vault must be emptied first.
-pub fn close_vault<'info>(
-    vault: &InterfaceAccount<'info, TokenAccount>,
-    destination: AccountInfo<'info>,
-    escrow: &Account<'info, Escrow>,
-    token_program: &Interface<'info, TokenInterface>,
+// Once every tier is claimed or refunded: sends whatever is left in the vault
+// to the organizer, then closes the escrow and returns its rent to the
+// organizer. The leftover can only be lamports someone sent to the vault on
+// their own, because every tier's amount has already been paid out.
+pub fn close_if_settled<'info>(
+    escrow: &mut Account<'info, Escrow>,
+    vault: &SystemAccount<'info>,
+    organizer: AccountInfo<'info>,
+    system_program: &Program<'info, System>,
 ) -> Result<()> {
-    let organizer = escrow.organizer;
-    let bounty_id_bytes = escrow.bounty_id.to_le_bytes();
-    let bump_bytes = [escrow.bump];
-    let escrow_seeds: &[&[u8]] = &[
-        ESCROW_SEED,
-        organizer.as_ref(),
-        &bounty_id_bytes,
-        &bump_bytes,
-    ];
-    let signer_seeds: &[&[&[u8]]] = &[escrow_seeds];
+    if !escrow.is_settled() {
+        return Ok(());
+    }
 
-    let close_accounts = CloseAccount {
-        account: vault.to_account_info(),
-        destination,
-        authority: escrow.to_account_info(),
-    };
-    let close_context =
-        CpiContext::new_with_signer(token_program.key(), close_accounts, signer_seeds);
-    token_interface::close_account(close_context)
+    let remainder = vault.lamports();
+    if remainder > 0 {
+        pay_from_vault(escrow, vault, organizer.clone(), system_program, remainder)?;
+    }
+
+    emit!(EscrowClosed {
+        escrow: escrow.key()
+    });
+    escrow.close(organizer)
 }

@@ -1359,3 +1359,388 @@ describeLocal("vote_winner", () => {
     expect((await fetchTier(late.escrow, 0)).votes.length).to.equal(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// claim_prize and refund_unclaimed
+// ---------------------------------------------------------------------------
+
+// `organizer` is the account passed as the bounty's organizer, which a test
+// can replace with a wrong one.
+async function claimPrize(
+  winner: web3.Keypair,
+  bounty: Bounty,
+  tierIndex: number,
+  organizer: web3.PublicKey
+): Promise<string> {
+  return programFor(winner)
+    .methods.claimPrize(tierIndex)
+    .accountsPartial({
+      winner: winner.publicKey,
+      escrow: bounty.escrow,
+      vault: bounty.vault,
+      organizer,
+    })
+    .rpc();
+}
+
+async function refundInstruction(
+  organizer: web3.Keypair,
+  bounty: Bounty,
+  tierIndex: number
+): Promise<web3.TransactionInstruction> {
+  return programFor(organizer)
+    .methods.refundUnclaimed(tierIndex)
+    .accountsPartial({
+      organizer: organizer.publicKey,
+      escrow: bounty.escrow,
+      vault: bounty.vault,
+    })
+    .instruction();
+}
+
+async function refundUnclaimed(
+  organizer: web3.Keypair,
+  bounty: Bounty,
+  tierIndex: number
+): Promise<string> {
+  return programFor(organizer)
+    .methods.refundUnclaimed(tierIndex)
+    .accountsPartial({
+      organizer: organizer.publicKey,
+      escrow: bounty.escrow,
+      vault: bounty.vault,
+    })
+    .rpc();
+}
+
+// Sends several instructions in one transaction, paid for by `signer`.
+async function sendInstructions(
+  signer: web3.Keypair,
+  instructions: web3.TransactionInstruction[]
+): Promise<string> {
+  const tx = new web3.Transaction();
+  for (const instruction of instructions) {
+    tx.add(instruction);
+  }
+  return providerFor(signer).sendAndConfirm(tx, [], CONFIRM);
+}
+
+// The two votes a three-judge bounty needs to decide a tier.
+async function decideTier(
+  judges: web3.Keypair[],
+  bounty: Bounty,
+  tierIndex: number,
+  winner: web3.PublicKey
+) {
+  await voteWinner(judges[0], bounty.escrow, tierIndex, winner);
+  await voteWinner(judges[1], bounty.escrow, tierIndex, winner);
+}
+
+describeLocal("claim_prize and refund_unclaimed", () => {
+  let organizer: web3.Keypair;
+  let judges: web3.Keypair[];
+  let first: web3.Keypair;
+  let second: web3.Keypair;
+  let stranger: web3.Keypair;
+  let builder: web3.Keypair;
+  // Claimed in full before its deadline. Its vault was sent extra lamports
+  // before creation.
+  let early: Bounty;
+  // Goes through every refund case: tier 0 is claimed after the deadline,
+  // tier 1's winner never claims, tier 2 never gets a winner.
+  let lifecycle: Bounty;
+  // Never touched, then refunded in one transaction. Its vault was sent extra
+  // lamports before creation.
+  let untouched: Bounty;
+  const prefunded = 2_000_000;
+
+  // Pre-funds the vault of the organizer's next bounty, then creates it.
+  async function createPrefundedBounty(options: BountyOptions) {
+    const bountyId = await nextBountyId(organizer.publicKey);
+    await fund(vaultPda(organizer.publicKey, bountyId)[0], prefunded);
+    return createBounty(organizer, options);
+  }
+
+  before(async () => {
+    organizer = await newFundedWallet(ORGANIZER_LAMPORTS);
+    judges = await newJudges(3);
+    first = await newFundedWallet(FEE_LAMPORTS);
+    second = await newFundedWallet(FEE_LAMPORTS);
+    stranger = await newFundedWallet(FEE_LAMPORTS);
+    builder = await newFundedWallet(BUILDER_LAMPORTS);
+    const judgeKeys = publicKeysOf(judges);
+
+    early = await createPrefundedBounty({ judges: judgeKeys });
+    lifecycle = await createBounty(organizer, {
+      judges: judgeKeys,
+      prizeAmounts: [
+        new BN(7 * MIN_PRIZE_AMOUNT),
+        new BN(5 * MIN_PRIZE_AMOUNT),
+        new BN(3 * MIN_PRIZE_AMOUNT),
+      ],
+    });
+    untouched = await createPrefundedBounty({
+      judges: judgeKeys,
+      prizeAmounts: [
+        new BN(4 * MIN_PRIZE_AMOUNT),
+        new BN(3 * MIN_PRIZE_AMOUNT),
+        new BN(2 * MIN_PRIZE_AMOUNT),
+        new BN(MIN_PRIZE_AMOUNT),
+      ],
+    });
+
+    await submitEntry(builder, lifecycle.escrow, DEFAULT_ENTRY);
+    await decideTier(judges, lifecycle, 0, first.publicKey);
+    await decideTier(judges, lifecycle, 1, second.publicKey);
+  });
+
+  describe("before the deadline", () => {
+    it("rejects a claim on an undecided tier or a tier that does not exist", async () => {
+      await expectError(
+        claimPrize(first, early, 0, organizer.publicKey),
+        "TierNotFinalized"
+      );
+      await expectError(
+        claimPrize(first, early, 2, organizer.publicKey),
+        "InvalidTier"
+      );
+    });
+
+    it("rejects anyone but the winner", async () => {
+      await decideTier(judges, early, 0, first.publicKey);
+      await expectError(
+        claimPrize(stranger, early, 0, organizer.publicKey),
+        "NotWinner"
+      );
+      expect((await fetchTier(early.escrow, 0)).claimed).to.equal(false);
+    });
+
+    it("rejects a wrong organizer account", async () => {
+      await expectError(
+        claimPrize(first, early, 0, stranger.publicKey),
+        "OrganizerMismatch"
+      );
+    });
+
+    it("pays the winner, before the deadline too", async () => {
+      const amount = early.params.prizeAmounts[0].toNumber();
+      const winnerBefore = await lamportsOf(first.publicKey);
+      const vaultBefore = await lamportsOf(early.vault);
+
+      const signature = await claimPrize(first, early, 0, organizer.publicKey);
+
+      const fee = await txFee(signature);
+      expect((await lamportsOf(first.publicKey)) - winnerBefore).to.equal(
+        amount - fee
+      );
+      expect(vaultBefore - (await lamportsOf(early.vault))).to.equal(amount);
+      const tier = await fetchTier(early.escrow, 0);
+      expect(tier.claimed).to.equal(true);
+      expect(tier.refunded).to.equal(false);
+    });
+
+    it("rejects a second claim", async () => {
+      await expectError(
+        claimPrize(first, early, 0, organizer.publicKey),
+        "PrizeAlreadyClaimed"
+      );
+    });
+
+    it("closes the bounty when the last tier is claimed, sweeping the vault to the organizer", async () => {
+      await decideTier(judges, early, 1, second.publicKey);
+      const amount = early.params.prizeAmounts[1].toNumber();
+      const escrowRent = await lamportsOf(early.escrow);
+      const organizerBefore = await lamportsOf(organizer.publicKey);
+      const winnerBefore = await lamportsOf(second.publicKey);
+
+      const signature = await claimPrize(second, early, 1, organizer.publicKey);
+
+      const fee = await txFee(signature);
+      expect((await lamportsOf(second.publicKey)) - winnerBefore).to.equal(
+        amount - fee
+      );
+      // The organizer gets the escrow's rent and the lamports that were sent
+      // to the vault before creation.
+      expect(
+        (await lamportsOf(organizer.publicKey)) - organizerBefore
+      ).to.equal(escrowRent + prefunded);
+      expect(await connection.getAccountInfo(early.escrow)).to.equal(null);
+      expect(await lamportsOf(early.vault)).to.equal(0);
+    });
+
+    it("can't be blocked by the organizer handing their wallet to another program", async () => {
+      const owner = await newFundedWallet(ORGANIZER_LAMPORTS);
+      const bounty = await createBounty(owner, {
+        judges: publicKeysOf(judges),
+        prizeAmounts: [new BN(MIN_PRIZE_AMOUNT)],
+      });
+      await decideTier(judges, bounty, 0, first.publicKey);
+
+      // The organizer reassigns their own wallet to some other program.
+      const otherProgram = web3.Keypair.generate().publicKey;
+      const assign = new web3.Transaction().add(
+        web3.SystemProgram.assign({
+          accountPubkey: owner.publicKey,
+          programId: otherProgram,
+        })
+      );
+      await providerFor(owner).sendAndConfirm(assign, [], CONFIRM);
+      const ownerInfo = await connection.getAccountInfo(owner.publicKey);
+      expect(ownerInfo?.owner.toBase58()).to.equal(otherProgram.toBase58());
+
+      // The claim still goes through, and the escrow's rent is still credited
+      // to the organizer's address.
+      const escrowRent = await lamportsOf(bounty.escrow);
+      const ownerBefore = await lamportsOf(owner.publicKey);
+      await claimPrize(first, bounty, 0, owner.publicKey);
+      expect(await connection.getAccountInfo(bounty.escrow)).to.equal(null);
+      expect((await lamportsOf(owner.publicKey)) - ownerBefore).to.equal(
+        escrowRent
+      );
+    });
+
+    it("lets only the organizer refund", async () => {
+      await expectError(
+        refundUnclaimed(stranger, lifecycle, 2),
+        "UnauthorizedOrganizer"
+      );
+    });
+
+    it("never refunds before the deadline", async () => {
+      await expectError(
+        refundUnclaimed(organizer, lifecycle, 2),
+        "DeadlineNotReached"
+      );
+      await expectError(
+        refundUnclaimed(organizer, lifecycle, 1),
+        "DeadlineNotReached"
+      );
+      expect((await fetchTier(lifecycle.escrow, 2)).refunded).to.equal(false);
+    });
+  });
+
+  describe("after the deadline, inside the claim window", () => {
+    before(async () => {
+      await advanceClockPast(lifecycle.params.deadline);
+      await advanceClockPast(untouched.params.deadline);
+    });
+
+    it("lets a winner still claim", async () => {
+      const amount = lifecycle.params.prizeAmounts[0].toNumber();
+      const before = await lamportsOf(first.publicKey);
+      const signature = await claimPrize(
+        first,
+        lifecycle,
+        0,
+        organizer.publicKey
+      );
+      const fee = await txFee(signature);
+      expect((await lamportsOf(first.publicKey)) - before).to.equal(
+        amount - fee
+      );
+      expect((await fetchTier(lifecycle.escrow, 0)).claimed).to.equal(true);
+    });
+
+    it("refunds a tier that never got a winner", async () => {
+      const amount = lifecycle.params.prizeAmounts[2].toNumber();
+      const before = await lamportsOf(organizer.publicKey);
+      const signature = await refundUnclaimed(organizer, lifecycle, 2);
+      const fee = await txFee(signature);
+      expect((await lamportsOf(organizer.publicKey)) - before).to.equal(
+        amount - fee
+      );
+      const tier = await fetchTier(lifecycle.escrow, 2);
+      expect(tier.refunded).to.equal(true);
+      expect(tier.claimed).to.equal(false);
+      // Tier 1 is still open, so the bounty stays.
+      expect(await connection.getAccountInfo(lifecycle.escrow)).to.not.equal(
+        null
+      );
+    });
+
+    it("rejects refunding the same tier twice, or a claimed tier", async () => {
+      await expectError(
+        refundUnclaimed(organizer, lifecycle, 2),
+        "RefundNotEligible"
+      );
+      await expectError(
+        refundUnclaimed(organizer, lifecycle, 0),
+        "RefundNotEligible"
+      );
+    });
+
+    it("keeps an unclaimed winner's prize during the claim window", async () => {
+      await expectError(
+        refundUnclaimed(organizer, lifecycle, 1),
+        "ClaimWindowOpen"
+      );
+      expect((await fetchTier(lifecycle.escrow, 1)).refunded).to.equal(false);
+    });
+  });
+
+  describe("after the claim window", () => {
+    before(async () => {
+      const escrow = await program.account.escrow.fetch(lifecycle.escrow);
+      await advanceClockPast(escrow.claimDeadline.toNumber());
+      await advanceClockPast(untouched.params.deadline + MIN_CLAIM_WINDOW);
+    });
+
+    it("stops late claims", async () => {
+      await expectError(
+        claimPrize(second, lifecycle, 1, organizer.publicKey),
+        "ClaimWindowClosed"
+      );
+      expect((await fetchTier(lifecycle.escrow, 1)).claimed).to.equal(false);
+    });
+
+    it("refunds the unclaimed winner's prize and closes the bounty", async () => {
+      const amount = lifecycle.params.prizeAmounts[1].toNumber();
+      const escrowRent = await lamportsOf(lifecycle.escrow);
+      const before = await lamportsOf(organizer.publicKey);
+
+      const signature = await refundUnclaimed(organizer, lifecycle, 1);
+
+      const fee = await txFee(signature);
+      expect((await lamportsOf(organizer.publicKey)) - before).to.equal(
+        amount + escrowRent - fee
+      );
+      expect(await connection.getAccountInfo(lifecycle.escrow)).to.equal(null);
+      expect(await lamportsOf(lifecycle.vault)).to.equal(0);
+    });
+
+    it("lets a builder close their entry after the bounty has closed", async () => {
+      const [entry] = submissionPda(lifecycle.escrow, builder.publicKey);
+      const rent = await lamportsOf(entry);
+      const before = await lamportsOf(builder.publicKey);
+      const signature = await closeEntry(builder, entry);
+      const fee = await txFee(signature);
+      expect(await connection.getAccountInfo(entry)).to.equal(null);
+      expect((await lamportsOf(builder.publicKey)) - before).to.equal(
+        rent - fee
+      );
+    });
+
+    it("refunds every tier of an untouched bounty in one transaction", async () => {
+      const prizePool = sumOf(untouched.params.prizeAmounts).toNumber();
+      const escrowRent = await lamportsOf(untouched.escrow);
+      const before = await lamportsOf(organizer.publicKey);
+
+      const instructions: web3.TransactionInstruction[] = [];
+      for (let tierIndex = 0; tierIndex < 4; tierIndex++) {
+        instructions.push(
+          await refundInstruction(organizer, untouched, tierIndex)
+        );
+      }
+      const signature = await sendInstructions(organizer, instructions);
+
+      // Every prize, the escrow's rent and the lamports sent to the vault
+      // before creation all go back to the organizer.
+      const fee = await txFee(signature);
+      expect((await lamportsOf(organizer.publicKey)) - before).to.equal(
+        prizePool + prefunded + escrowRent - fee
+      );
+      expect(await connection.getAccountInfo(untouched.escrow)).to.equal(null);
+      expect(await lamportsOf(untouched.vault)).to.equal(0);
+    });
+  });
+});
