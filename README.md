@@ -12,15 +12,14 @@ were never decided, or whose winner never claimed, and only after the
 matching deadline.
 
 **Program ID (devnet):** `3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM`
+(v3, deployed in slot 511433826)
 
-> **Status: being rebuilt (October 2026).**
+> **Status (October 2026):**
 >
-> - This README describes the **target design (v3)**. It follows the
->   OpenBounty web version.
-> - Devnet still runs the **previous v2 program** (SPL-token prizes and win
->   badges, deployed in slot 506727070) until the v3 upgrade lands. v2 and
->   v3 are not compatible.
-> - The mobile app is not built yet.
+> - The **v3 program** is live on devnet, and its interface is frozen.
+> - v3 replaced v2 (SPL-token prizes and win badges). The two are not
+>   compatible.
+> - The mobile app is in development.
 
 ## Relation to the Web Version
 
@@ -80,7 +79,7 @@ for every state change.
 
 ## Trust Assumptions
 
-**What the program guarantees** (v3, once deployed):
+**What the program guarantees** (v3, as deployed):
 
 - **The prize pool is fully deposited before the bounty exists.**
   Creation fails unless the vault receives exactly the prize total.
@@ -110,6 +109,16 @@ for every state change.
 - **Judge independence.** The organizer chooses the judges. The program
   guarantees that a majority of the listed judges decides, not that the
   judges are independent.
+- **Judges can decide not to vote.** Every prize the judges leave
+  undecided returns to the organizer after judging ends.
+- **Unclaimed prizes go back.** A winner who does not claim within the
+  claim window loses the prize to the organizer.
+- **Only the organizer can refund.** If the organizer loses their wallet,
+  prizes that were never decided or never claimed stay in the vault for
+  good. Winners can still claim during the claim window.
+- **Winners must be able to sign.** Judges can vote for any address,
+  including one that can never sign a claim. That prize then returns to
+  the organizer after the claim window.
 - **Bounty details are untrusted.** The longer description is a JSON file
   the organizer hosts, linked from the bounty. It can change at any time
   and is shown as plain text. The on-chain title, judges and prizes are
@@ -123,8 +132,7 @@ code and no build tooling.
 ```
 OpenBountyMobile/
 ├── onchain/     Anchor / Rust program (Solana devnet), the source of truth
-├── offchain/    React Native (Expo) Android app (not created yet)
-└── assets/      v2 win-badge metadata; removed after the v3 upgrade
+└── offchain/    React Native (Expo) Android app (not created yet)
 ```
 
 The only coupling between the two modules is the deployed **program ID**
@@ -235,8 +243,8 @@ Mobile Wallet Adapter is Android-only.
 
 | Step | Status |
 |---|---|
-| v3 program, matching the web program, with unlimited bounties | planned |
-| v3 upgrade on devnet | planned |
+| v3 program with entries, majority voting, per-prize refunds and unlimited bounties | done |
+| v3 upgrade on devnet | done (slot 511433826) |
 | Android app: Explore, bounty page (prizes, entries, judging), create, your bounties, markets | planned |
 | End-to-end devnet run and release APK | planned |
 | Upgrade authority moved to a Squads multisig | parked |

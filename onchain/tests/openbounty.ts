@@ -1937,3 +1937,148 @@ describeLocal("IDL", () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// devnet smoke (runs only with OPENBOUNTY_DEVNET=1)
+// ---------------------------------------------------------------------------
+
+// Devnet has no time travel, so this waits in real time until the on-chain
+// clock is strictly past `timestamp`.
+async function waitForChainTimePast(timestamp: number) {
+  for (let attempt = 0; attempt < 120; attempt++) {
+    if ((await chainNow()) > timestamp) {
+      return;
+    }
+    await sleep(5000);
+  }
+  throw new Error("On-chain clock never passed " + timestamp);
+}
+
+async function computeUnitsOf(signature: string): Promise<number> {
+  const meta = await fetchTransactionMeta(signature);
+  if (meta.computeUnitsConsumed === undefined) {
+    return 0;
+  }
+  return meta.computeUnitsConsumed;
+}
+
+// Sends what is left in a test wallet back to the provider wallet, so the
+// smoke test spends as little devnet SOL as possible.
+async function returnToProvider(wallet: web3.Keypair) {
+  const balance = await lamportsOf(wallet.publicKey);
+  const fee = 5000;
+  if (balance <= fee) {
+    return;
+  }
+  const tx = new web3.Transaction().add(
+    web3.SystemProgram.transfer({
+      fromPubkey: wallet.publicKey,
+      toPubkey: provider.wallet.publicKey,
+      lamports: balance - fee,
+    })
+  );
+  await providerFor(wallet).sendAndConfirm(tx, [], CONFIRM);
+}
+
+describeDevnet("devnet smoke", () => {
+  it("runs a whole bounty: create, enter, vote, claim, refund, close entry", async () => {
+    const organizer = await newFundedWallet(web3.LAMPORTS_PER_SOL / 20);
+    const judges = await newJudges(3);
+    const builder = await newFundedWallet(BUILDER_LAMPORTS / 10);
+    console.log("      organizer " + organizer.publicKey.toBase58());
+    console.log("      builder   " + builder.publicKey.toBase58());
+
+    // Entries close in about a minute and judging ends a minute later.
+    const now = await chainNow();
+    const bounty = await createBounty(organizer, {
+      judges: publicKeysOf(judges),
+      title: "Devnet smoke",
+      metadataUri: "",
+      prizeAmounts: [new BN(2 * MIN_PRIZE_AMOUNT), new BN(MIN_PRIZE_AMOUNT)],
+      submissionsDeadline: now + 60,
+      deadline: now + 120,
+    });
+    console.log(
+      "      escrow    " +
+        bounty.escrow.toBase58() +
+        " (bounty " +
+        bounty.bountyId +
+        ")"
+    );
+    console.log(
+      "      create    " +
+        bounty.signature +
+        " CU " +
+        (await computeUnitsOf(bounty.signature))
+    );
+    expect(eventNames(await eventsOf(bounty.signature))).to.deep.equal([
+      "escrowInitialized",
+    ]);
+
+    const enter = await submitEntry(builder, bounty.escrow, DEFAULT_ENTRY);
+    console.log(
+      "      enter     " + enter + " CU " + (await computeUnitsOf(enter))
+    );
+
+    const vote1 = await voteWinner(
+      judges[0],
+      bounty.escrow,
+      0,
+      builder.publicKey
+    );
+    const vote2 = await voteWinner(
+      judges[1],
+      bounty.escrow,
+      0,
+      builder.publicKey
+    );
+    console.log(
+      "      vote      " + vote1 + " CU " + (await computeUnitsOf(vote1))
+    );
+    console.log(
+      "      deciding  " + vote2 + " CU " + (await computeUnitsOf(vote2))
+    );
+    expect(eventNames(await eventsOf(vote2))).to.deep.equal([
+      "voteCast",
+      "tierFinalized",
+    ]);
+
+    const builderBefore = await lamportsOf(builder.publicKey);
+    const claim = await claimPrize(builder, bounty, 0, organizer.publicKey);
+    console.log(
+      "      claim     " + claim + " CU " + (await computeUnitsOf(claim))
+    );
+    expect((await lamportsOf(builder.publicKey)) - builderBefore).to.equal(
+      2 * MIN_PRIZE_AMOUNT - (await txFee(claim))
+    );
+
+    // Tier 1 never gets a winner. Once judging ends, refunding it settles the
+    // bounty and closes it.
+    console.log("      waiting for the deadline (about two minutes)...");
+    await waitForChainTimePast(bounty.params.deadline);
+    const refund = await refundUnclaimed(organizer, bounty, 1);
+    console.log(
+      "      refund    " + refund + " CU " + (await computeUnitsOf(refund))
+    );
+    expect(eventNames(await eventsOf(refund))).to.deep.equal([
+      "tierRefunded",
+      "escrowClosed",
+    ]);
+    expect(
+      await connection.getAccountInfo(bounty.escrow, "confirmed")
+    ).to.equal(null);
+    expect(await lamportsOf(bounty.vault)).to.equal(0);
+
+    const [entry] = submissionPda(bounty.escrow, builder.publicKey);
+    const close = await closeEntry(builder, entry);
+    console.log(
+      "      close     " + close + " CU " + (await computeUnitsOf(close))
+    );
+    expect(await connection.getAccountInfo(entry, "confirmed")).to.equal(null);
+
+    const wallets = [organizer, builder, ...judges];
+    for (const wallet of wallets) {
+      await returnToProvider(wallet);
+    }
+  });
+});
