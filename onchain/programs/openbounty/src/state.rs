@@ -2,30 +2,100 @@ use anchor_lang::prelude::*;
 
 use crate::constants::*;
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
-pub struct TierVote {
-    pub judge: Pubkey,
-    pub candidate: Pubkey,
+// One per organizer. It is created with their first bounty and never closed,
+// so the counter only ever goes up and a bounty ID is never handed out twice.
+// That keeps every escrow address unique forever. Its layout is unchanged
+// from v2, so profiles already on devnet stay valid.
+#[account]
+#[derive(InitSpace)]
+pub struct OrganizerProfile {
+    pub next_bounty_id: u64,
 }
 
-// The fixed-size fields come first, so within a tier only `winner` and
-// `votes` vary in size.
+impl OrganizerProfile {
+    // The extra 8 bytes hold the account discriminator.
+    pub const LEN: usize = 8 + OrganizerProfile::INIT_SPACE;
+}
+
+// A funded bounty. An escrow only ever exists fully funded: it is created in
+// the same instruction that moves the whole prize pool into the vault.
+//
+// No role is stored as a flag. The organizer is `organizer`, a judge is any
+// key in `judges`, and a winner is `prize_tiers[i].winner` once set.
+//
+// Fixed-size fields come first, so clients can filter with `memcmp` at fixed
+// offsets: `organizer` at 8 and `bounty_id` at 40.
+#[account]
+#[derive(InitSpace)]
+pub struct Escrow {
+    pub organizer: Pubkey,
+    pub bounty_id: u64,
+    pub bump: u8,
+    pub vault_bump: u8,
+    // Votes for the same candidate on a tier needed to decide it.
+    pub vote_threshold: u8,
+    pub created_at: i64,
+    // Entries are accepted until this time (inclusive). Never after
+    // `deadline`.
+    pub submissions_deadline: i64,
+    // Judges vote until this time (inclusive). After it, tiers that never got
+    // a winner can be refunded.
+    pub deadline: i64,
+    // Winners claim until this time (inclusive): `deadline` plus the
+    // organizer's claim window. After it, unclaimed prizes can be refunded.
+    pub claim_deadline: i64,
+    #[max_len(MAX_TITLE_LENGTH)]
+    pub title: String,
+    #[max_len(MAX_METADATA_URI_LENGTH)]
+    pub metadata_uri: String,
+    #[max_len(MAX_JUDGES)]
+    pub judges: Vec<Pubkey>,
+    #[max_len(MAX_PRIZE_TIERS)]
+    pub prize_tiers: Vec<PrizeTier>,
+}
+
+impl Escrow {
+    // The extra 8 bytes hold the account discriminator.
+    pub const LEN: usize = 8 + Escrow::INIT_SPACE;
+
+    pub fn is_judge(&self, key: &Pubkey) -> bool {
+        self.judges.contains(key)
+    }
+
+    // True once every tier is claimed or refunded. The escrow then closes.
+    pub fn is_settled(&self) -> bool {
+        for tier in &self.prize_tiers {
+            if !tier.is_settled() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+// Clients decode escrows at the offsets above, and `init` allocates through a
+// system program call that is capped at 10 KiB. Changing a field or a limit
+// fails the build here instead of silently moving the layout.
+const _: () = assert!(Escrow::LEN == 1877);
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct PrizeTier {
+    // Lamports paid to this tier's winner.
     pub amount: u64,
-    pub claimed: bool,
-    // Reserved for the win badge, so adding it later needs no layout change.
-    pub badge_minted: bool,
+    // Set by the program when a candidate reaches `vote_threshold`.
     pub winner: Option<Pubkey>,
-    // Each judge votes at most once per tier, so this never holds more
-    // than MAX_JUDGES entries.
+    pub claimed: bool,
+    // Set when the organizer takes this tier's amount back.
+    pub refunded: bool,
+    // Each judge votes at most once per tier, so this never holds more than
+    // MAX_JUDGES entries.
     #[max_len(MAX_JUDGES)]
-    pub votes: Vec<TierVote>,
+    pub votes: Vec<Vote>,
 }
 
 impl PrizeTier {
-    pub fn is_finalized(&self) -> bool {
-        self.winner.is_some()
+    pub fn is_settled(&self) -> bool {
+        self.claimed || self.refunded
     }
 
     pub fn has_voted(&self, judge: &Pubkey) -> bool {
@@ -48,63 +118,41 @@ impl PrizeTier {
     }
 }
 
-// One per organizer. It is created with their first bounty and never
-// closed, so the counter only ever goes up and a bounty ID is never handed
-// out twice. That is what keeps every escrow address unique forever.
-#[account]
-#[derive(InitSpace)]
-pub struct OrganizerProfile {
-    pub next_bounty_id: u64,
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
+pub struct Vote {
+    pub judge: Pubkey,
+    pub candidate: Pubkey,
 }
 
-impl OrganizerProfile {
-    // The extra 8 bytes hold the account discriminator.
-    pub const LEN: usize = 8 + OrganizerProfile::INIT_SPACE;
-}
-
-// Clients filter escrows with `memcmp` at fixed byte offsets, so every
-// fixed-size field comes before the first string or vector, and none of
-// these fields may be moved. `version` is first so any future layout can be
-// told apart by one byte at offset 8. `judges` is the first variable-size
-// field, which puts each judge slot at a fixed offset as well.
+// A builder's entry to a bounty, one per wallet per bounty.
+//
+// Votes still name wallets, not entries: an entry shows judges what a
+// candidate built, but a wallet can be voted for without one.
+//
+// `escrow` comes first (offset 8), so clients list one bounty's entries with a
+// single `memcmp` filter.
 #[account]
 #[derive(InitSpace)]
-pub struct Escrow {
-    pub version: u8,             // offset 8
-    pub organizer: Pubkey,       // offset 9
-    pub bounty_id: u64,          // offset 41
-    pub mint: Pubkey,            // offset 49
-    pub deadline: i64,           // offset 81, voting closes
-    pub claim_deadline: i64,     // offset 89, claiming closes
-    pub threshold: u8,           // offset 97
-    pub bump: u8,                // offset 98
-    pub vault_bump: u8,          // offset 99
-    pub metadata_hash: [u8; 32], // offset 100
-    #[max_len(MAX_JUDGES)]
-    pub judges: Vec<Pubkey>, // offset 132, judge i at 136 + 32 * i
-    #[max_len(MAX_TITLE_LEN)]
+pub struct Submission {
+    pub escrow: Pubkey,
+    // Pays the rent and gets it back through close_entry.
+    pub submitter: Pubkey,
+    pub submitted_at: i64,
+    // The bounty's deadline, copied at submission so the entry can still be
+    // closed after the escrow account itself has closed.
+    pub close_after: i64,
+    pub bump: u8,
+    #[max_len(MAX_ENTRY_TITLE_LENGTH)]
     pub title: String,
-    #[max_len(MAX_METADATA_URI_LEN)]
-    pub metadata_uri: String,
-    #[max_len(MAX_TIERS)]
-    pub tiers: Vec<PrizeTier>,
+    #[max_len(MAX_ENTRY_URL_LENGTH)]
+    pub url: String,
+    #[max_len(MAX_ENTRY_DESCRIPTION_LENGTH)]
+    pub description: String,
 }
 
-impl Escrow {
-    // The extra 8 bytes hold the account discriminator Anchor writes
-    // at the start of every account.
-    pub const LEN: usize = 8 + Escrow::INIT_SPACE;
-
-    pub fn is_judge(&self, key: &Pubkey) -> bool {
-        self.judges.contains(key)
-    }
-
-    pub fn all_tiers_claimed(&self) -> bool {
-        for tier in &self.tiers {
-            if !tier.claimed {
-                return false;
-            }
-        }
-        true
-    }
+impl Submission {
+    // The extra 8 bytes hold the account discriminator.
+    pub const LEN: usize = 8 + Submission::INIT_SPACE;
 }
+
+const _: () = assert!(Submission::LEN == 531);

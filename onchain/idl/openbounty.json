@@ -1,0 +1,523 @@
+{
+  "address": "3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM",
+  "metadata": {
+    "name": "openbounty",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [],
+  "events": [
+    {
+      "name": "EntryClosed",
+      "discriminator": [
+        238,
+        38,
+        131,
+        252,
+        14,
+        222,
+        236,
+        36
+      ]
+    },
+    {
+      "name": "EntrySubmitted",
+      "discriminator": [
+        224,
+        22,
+        158,
+        137,
+        145,
+        212,
+        95,
+        22
+      ]
+    },
+    {
+      "name": "EscrowClosed",
+      "discriminator": [
+        109,
+        20,
+        57,
+        51,
+        217,
+        118,
+        3,
+        173
+      ]
+    },
+    {
+      "name": "EscrowInitialized",
+      "discriminator": [
+        222,
+        186,
+        157,
+        47,
+        145,
+        142,
+        176,
+        248
+      ]
+    },
+    {
+      "name": "PrizeClaimed",
+      "discriminator": [
+        213,
+        150,
+        192,
+        76,
+        199,
+        33,
+        212,
+        38
+      ]
+    },
+    {
+      "name": "TierFinalized",
+      "discriminator": [
+        119,
+        204,
+        98,
+        159,
+        3,
+        208,
+        139,
+        154
+      ]
+    },
+    {
+      "name": "TierRefunded",
+      "discriminator": [
+        255,
+        244,
+        7,
+        120,
+        19,
+        207,
+        187,
+        156
+      ]
+    },
+    {
+      "name": "VoteCast",
+      "discriminator": [
+        39,
+        53,
+        195,
+        104,
+        188,
+        17,
+        225,
+        213
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidTitle",
+      "msg": "Title is empty or exceeds the maximum length"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidMetadataUri",
+      "msg": "Metadata URI exceeds the maximum length"
+    },
+    {
+      "code": 6002,
+      "name": "InvalidJudgeCount",
+      "msg": "Judge list is empty or exceeds the maximum number of judges"
+    },
+    {
+      "code": 6003,
+      "name": "DuplicateJudge",
+      "msg": "Judge list contains a duplicate judge"
+    },
+    {
+      "code": 6004,
+      "name": "OrganizerCannotBeJudge",
+      "msg": "The organizer cannot be a judge"
+    },
+    {
+      "code": 6005,
+      "name": "InvalidVoteThreshold",
+      "msg": "Vote threshold must be a strict majority of the judges"
+    },
+    {
+      "code": 6006,
+      "name": "InvalidPrizeTierCount",
+      "msg": "Prize tier list is empty or exceeds the maximum number of tiers"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidPrizeAmount",
+      "msg": "Prize tier amount is below the minimum"
+    },
+    {
+      "code": 6008,
+      "name": "PrizePoolOverflow",
+      "msg": "Total prize pool overflows"
+    },
+    {
+      "code": 6009,
+      "name": "InvalidDeadline",
+      "msg": "Deadline must be in the future and at most 365 days away"
+    },
+    {
+      "code": 6010,
+      "name": "IncorrectFunding",
+      "msg": "Vault was not funded with the exact prize pool"
+    },
+    {
+      "code": 6011,
+      "name": "UnauthorizedOrganizer",
+      "msg": "Signer is not the organizer of this escrow"
+    },
+    {
+      "code": 6012,
+      "name": "UnauthorizedJudge",
+      "msg": "Signer is not a judge of this escrow"
+    },
+    {
+      "code": 6013,
+      "name": "OrganizerCannotVote",
+      "msg": "The organizer cannot vote"
+    },
+    {
+      "code": 6014,
+      "name": "NotWinner",
+      "msg": "Signer is not the winner of this prize tier"
+    },
+    {
+      "code": 6015,
+      "name": "InvalidTier",
+      "msg": "Prize tier index is out of range"
+    },
+    {
+      "code": 6016,
+      "name": "InvalidCandidate",
+      "msg": "Candidate is not eligible to win"
+    },
+    {
+      "code": 6017,
+      "name": "DuplicateVote",
+      "msg": "Judge has already voted on this prize tier"
+    },
+    {
+      "code": 6018,
+      "name": "TierAlreadyFinalized",
+      "msg": "Prize tier already has a finalized winner"
+    },
+    {
+      "code": 6019,
+      "name": "TierNotFinalized",
+      "msg": "Prize tier has no finalized winner"
+    },
+    {
+      "code": 6020,
+      "name": "PrizeAlreadyClaimed",
+      "msg": "Prize has already been claimed"
+    },
+    {
+      "code": 6021,
+      "name": "DeadlineNotReached",
+      "msg": "Deadline has not been reached"
+    },
+    {
+      "code": 6022,
+      "name": "RefundNotEligible",
+      "msg": "Prize tier is not eligible for refund"
+    },
+    {
+      "code": 6023,
+      "name": "OrganizerMismatch",
+      "msg": "Organizer account does not match the escrow organizer"
+    },
+    {
+      "code": 6024,
+      "name": "ArithmeticOverflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6025,
+      "name": "VotingClosed",
+      "msg": "Voting closed at the deadline"
+    },
+    {
+      "code": 6026,
+      "name": "InvalidSubmissionsDeadline",
+      "msg": "Entry deadline must be in the future and no later than the deadline"
+    },
+    {
+      "code": 6027,
+      "name": "InvalidClaimWindow",
+      "msg": "Claim window is outside the allowed range"
+    },
+    {
+      "code": 6028,
+      "name": "ClaimWindowClosed",
+      "msg": "The claim window for this prize has closed"
+    },
+    {
+      "code": 6029,
+      "name": "ClaimWindowOpen",
+      "msg": "The winner can still claim this prize"
+    },
+    {
+      "code": 6030,
+      "name": "SubmissionsClosed",
+      "msg": "Entries for this bounty have closed"
+    },
+    {
+      "code": 6031,
+      "name": "OrganizerCannotSubmit",
+      "msg": "The organizer cannot enter their own bounty"
+    },
+    {
+      "code": 6032,
+      "name": "JudgeCannotSubmit",
+      "msg": "A judge cannot enter a bounty they judge"
+    },
+    {
+      "code": 6033,
+      "name": "InvalidEntryTitle",
+      "msg": "Entry name is empty or exceeds the maximum length"
+    },
+    {
+      "code": 6034,
+      "name": "InvalidEntryUrl",
+      "msg": "Entry link is empty or exceeds the maximum length"
+    },
+    {
+      "code": 6035,
+      "name": "InvalidEntryDescription",
+      "msg": "Entry description exceeds the maximum length"
+    },
+    {
+      "code": 6036,
+      "name": "EntryLocked",
+      "msg": "An entry can be closed only after the bounty's deadline"
+    }
+  ],
+  "types": [
+    {
+      "name": "EntryClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "submission",
+            "type": "pubkey"
+          },
+          {
+            "name": "submitter",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EntrySubmitted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "submission",
+            "type": "pubkey"
+          },
+          {
+            "name": "submitter",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EscrowClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EscrowInitialized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "organizer",
+            "type": "pubkey"
+          },
+          {
+            "name": "bounty_id",
+            "type": "u64"
+          },
+          {
+            "name": "prize_pool",
+            "type": "u64"
+          },
+          {
+            "name": "submissions_deadline",
+            "type": "i64"
+          },
+          {
+            "name": "deadline",
+            "type": "i64"
+          },
+          {
+            "name": "claim_deadline",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PrizeClaimed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "tier_index",
+            "type": "u8"
+          },
+          {
+            "name": "winner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TierFinalized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "tier_index",
+            "type": "u8"
+          },
+          {
+            "name": "winner",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TierRefunded",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "tier_index",
+            "type": "u8"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VoteCast",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "tier_index",
+            "type": "u8"
+          },
+          {
+            "name": "judge",
+            "type": "pubkey"
+          },
+          {
+            "name": "candidate",
+            "type": "pubkey"
+          }
+        ]
+      }
+    }
+  ],
+  "constants": [
+    {
+      "name": "ESCROW_SEED",
+      "type": "bytes",
+      "value": "[101, 115, 99, 114, 111, 119]"
+    },
+    {
+      "name": "MAX_CLAIM_WINDOW",
+      "type": "i64",
+      "value": "7776000"
+    },
+    {
+      "name": "MAX_DEADLINE_AHEAD",
+      "type": "i64",
+      "value": "31536000"
+    },
+    {
+      "name": "MIN_CLAIM_WINDOW",
+      "type": "i64",
+      "value": "86400"
+    },
+    {
+      "name": "MIN_PRIZE_AMOUNT",
+      "type": "u64",
+      "value": "1000000"
+    },
+    {
+      "name": "ORGANIZER_SEED",
+      "type": "bytes",
+      "value": "[111, 114, 103, 97, 110, 105, 122, 101, 114]"
+    },
+    {
+      "name": "SUBMISSION_SEED",
+      "type": "bytes",
+      "value": "[115, 117, 98, 109, 105, 115, 115, 105, 111, 110]"
+    },
+    {
+      "name": "VAULT_SEED",
+      "type": "bytes",
+      "value": "[118, 97, 117, 108, 116]"
+    }
+  ]
+}

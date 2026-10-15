@@ -1,68 +1,97 @@
 use anchor_lang::prelude::*;
 
-// These messages are shown directly to users in the mobile app, so they
-// are written as plain sentences. Codes start at 6000, in this order. A
-// variant's position is its code, and clients map codes to messages, so new
-// errors are only ever added at the end.
+// The same errors, in the same order, as the OpenBounty web program. Codes
+// start at 6000, and a variant's position is its code. Clients match on
+// codes, so once deployed, new errors are only ever added at the end.
 #[error_code]
-pub enum ErrorCode {
-    #[msg("Title must be between 1 and 50 bytes long.")]
-    InvalidTitleLength,
-    #[msg("Metadata URI must be at most 100 bytes long.")]
-    InvalidMetadataUriLength,
-    #[msg("A bounty needs at least one judge.")]
-    NoJudges,
-    #[msg("A bounty can have at most 5 judges.")]
-    TooManyJudges,
-    #[msg("Vote threshold must be at least 1 and no more than the number of judges.")]
-    InvalidThreshold,
-    #[msg("A bounty needs at least one prize tier.")]
-    NoTiers,
-    #[msg("A bounty can have at most 4 prize tiers.")]
-    TooManyTiers,
-    #[msg("Every prize tier must have an amount greater than zero.")]
-    InvalidAmount,
-    #[msg("The deadline must be in the future.")]
-    InvalidDeadline,
-    #[msg("That prize tier does not exist.")]
-    InvalidTierIndex,
-    #[msg("Only a judge of this bounty can vote.")]
-    NotAJudge,
-    #[msg("You have already voted on this prize tier.")]
-    AlreadyVoted,
-    #[msg("This prize tier already has a winner.")]
-    TierAlreadyFinalized,
-    #[msg("Voting for this bounty has closed.")]
-    DeadlinePassed,
-    #[msg("This prize tier does not have a winner yet.")]
-    TierNotFinalized,
-    #[msg("This prize has already been claimed.")]
-    TierAlreadyClaimed,
-    #[msg("Only the winner of this prize tier can claim it.")]
-    NotWinner,
-    #[msg("Only the organizer of this bounty can do this.")]
-    Unauthorized,
-    #[msg("Unclaimed funds can only be refunded after the claim deadline.")]
-    DeadlineNotPassed,
-    #[msg("There are no unclaimed funds to refund.")]
-    NoUnclaimedFunds,
-    #[msg("The prize amounts are too large to add up safely.")]
-    ArithmeticOverflow,
-    // The "7 days" here must match MIN_CLAIM_WINDOW.
-    #[msg("The claim deadline must be at least 7 days after the voting deadline.")]
-    InvalidClaimDeadline,
-    #[msg("The organizer of a bounty cannot also be one of its judges.")]
-    OrganizerCannotJudge,
-    #[msg("Each judge can only be listed once.")]
+pub enum OpenBountyError {
+    // Configuration (initialize_escrow)
+    #[msg("Title is empty or exceeds the maximum length")]
+    InvalidTitle,
+    #[msg("Metadata URI exceeds the maximum length")]
+    InvalidMetadataUri,
+    #[msg("Judge list is empty or exceeds the maximum number of judges")]
+    InvalidJudgeCount,
+    #[msg("Judge list contains a duplicate judge")]
     DuplicateJudge,
-    #[msg("This token is not supported, because its issuer could move, tax or block the escrowed funds.")]
-    UnsupportedMint,
-    #[msg("The vault did not receive the full prize pool.")]
-    DepositMismatch,
-    #[msg("The claim period for this bounty has ended.")]
-    ClaimDeadlinePassed,
-    #[msg("This bounty was created by an incompatible version of the program.")]
-    UnsupportedEscrowVersion,
-    #[msg("A badge has already been minted for this prize tier.")]
-    BadgeAlreadyMinted,
+    #[msg("The organizer cannot be a judge")]
+    OrganizerCannotBeJudge,
+    #[msg("Vote threshold must be a strict majority of the judges")]
+    InvalidVoteThreshold,
+    #[msg("Prize tier list is empty or exceeds the maximum number of tiers")]
+    InvalidPrizeTierCount,
+    #[msg("Prize tier amount is below the minimum")]
+    InvalidPrizeAmount,
+    #[msg("Total prize pool overflows")]
+    PrizePoolOverflow,
+    #[msg("Deadline must be in the future and at most 365 days away")]
+    InvalidDeadline,
+    #[msg("Vault was not funded with the exact prize pool")]
+    IncorrectFunding,
+
+    // Authorization
+    #[msg("Signer is not the organizer of this escrow")]
+    UnauthorizedOrganizer,
+    #[msg("Signer is not a judge of this escrow")]
+    UnauthorizedJudge,
+    #[msg("The organizer cannot vote")]
+    OrganizerCannotVote,
+    #[msg("Signer is not the winner of this prize tier")]
+    NotWinner,
+
+    // Voting (vote_winner)
+    #[msg("Prize tier index is out of range")]
+    InvalidTier,
+    #[msg("Candidate is not eligible to win")]
+    InvalidCandidate,
+    #[msg("Judge has already voted on this prize tier")]
+    DuplicateVote,
+    #[msg("Prize tier already has a finalized winner")]
+    TierAlreadyFinalized,
+
+    // Claims (claim_prize)
+    #[msg("Prize tier has no finalized winner")]
+    TierNotFinalized,
+    #[msg("Prize has already been claimed")]
+    PrizeAlreadyClaimed,
+
+    // Refunds (refund_unclaimed)
+    #[msg("Deadline has not been reached")]
+    DeadlineNotReached,
+    #[msg("Prize tier is not eligible for refund")]
+    RefundNotEligible,
+
+    // Account relationships
+    #[msg("Organizer account does not match the escrow organizer")]
+    OrganizerMismatch,
+    #[msg("Arithmetic overflow")]
+    ArithmeticOverflow,
+
+    // Deadlines and the claim window
+    #[msg("Voting closed at the deadline")]
+    VotingClosed,
+    #[msg("Entry deadline must be in the future and no later than the deadline")]
+    InvalidSubmissionsDeadline,
+    #[msg("Claim window is outside the allowed range")]
+    InvalidClaimWindow,
+    #[msg("The claim window for this prize has closed")]
+    ClaimWindowClosed,
+    #[msg("The winner can still claim this prize")]
+    ClaimWindowOpen,
+
+    // Entries (submit_entry, close_entry)
+    #[msg("Entries for this bounty have closed")]
+    SubmissionsClosed,
+    #[msg("The organizer cannot enter their own bounty")]
+    OrganizerCannotSubmit,
+    #[msg("A judge cannot enter a bounty they judge")]
+    JudgeCannotSubmit,
+    #[msg("Entry name is empty or exceeds the maximum length")]
+    InvalidEntryTitle,
+    #[msg("Entry link is empty or exceeds the maximum length")]
+    InvalidEntryUrl,
+    #[msg("Entry description exceeds the maximum length")]
+    InvalidEntryDescription,
+    #[msg("An entry can be closed only after the bounty's deadline")]
+    EntryLocked,
 }
