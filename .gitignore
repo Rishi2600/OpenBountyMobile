@@ -38,6 +38,7 @@ handoff/
 
 # ---------- devlog (plan and per-checkpoint log, kept local) ----------
 docs/DEVLOG.md
+docs/OFFCHAIN_HANDOFF.md
 
 # ---------- secrets / keys ----------
 .env
