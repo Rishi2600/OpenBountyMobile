@@ -18,4 +18,12 @@ declare_id!("3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM");
 #[program]
 pub mod openbounty {
     use super::*;
+
+    // Creates a bounty and funds its whole prize pool in one transaction.
+    pub fn initialize_escrow(
+        ctx: Context<InitializeEscrow>,
+        params: InitializeEscrowParams,
+    ) -> Result<()> {
+        instructions::initialize::handle_initialize_escrow(ctx, params)
+    }
 }

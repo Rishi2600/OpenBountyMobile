@@ -6,7 +6,151 @@
     "spec": "0.1.0",
     "description": "Created with Anchor"
   },
-  "instructions": [],
+  "instructions": [
+    {
+      "name": "initialize_escrow",
+      "discriminator": [
+        243,
+        160,
+        77,
+        153,
+        11,
+        92,
+        48,
+        209
+      ],
+      "accounts": [
+        {
+          "name": "organizer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "organizer_profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  114,
+                  103,
+                  97,
+                  110,
+                  105,
+                  122,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "organizer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "organizer"
+              },
+              {
+                "kind": "account",
+                "path": "organizer_profile.next_bounty_id",
+                "account": "OrganizerProfile"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "organizer"
+              },
+              {
+                "kind": "account",
+                "path": "organizer_profile.next_bounty_id",
+                "account": "OrganizerProfile"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "InitializeEscrowParams"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Escrow",
+      "discriminator": [
+        31,
+        213,
+        123,
+        187,
+        186,
+        22,
+        218,
+        155
+      ]
+    },
+    {
+      "name": "OrganizerProfile",
+      "discriminator": [
+        216,
+        88,
+        24,
+        216,
+        45,
+        218,
+        209,
+        79
+      ]
+    }
+  ],
   "events": [
     {
       "name": "EntryClosed",
@@ -342,6 +486,74 @@
       }
     },
     {
+      "name": "Escrow",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "organizer",
+            "type": "pubkey"
+          },
+          {
+            "name": "bounty_id",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "type": "u8"
+          },
+          {
+            "name": "vote_threshold",
+            "type": "u8"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "submissions_deadline",
+            "type": "i64"
+          },
+          {
+            "name": "deadline",
+            "type": "i64"
+          },
+          {
+            "name": "claim_deadline",
+            "type": "i64"
+          },
+          {
+            "name": "title",
+            "type": "string"
+          },
+          {
+            "name": "metadata_uri",
+            "type": "string"
+          },
+          {
+            "name": "judges",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "prize_tiers",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "PrizeTier"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "EscrowClosed",
       "type": {
         "kind": "struct",
@@ -390,6 +602,62 @@
       }
     },
     {
+      "name": "InitializeEscrowParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "title",
+            "type": "string"
+          },
+          {
+            "name": "metadata_uri",
+            "type": "string"
+          },
+          {
+            "name": "judges",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "vote_threshold",
+            "type": "u8"
+          },
+          {
+            "name": "prize_amounts",
+            "type": {
+              "vec": "u64"
+            }
+          },
+          {
+            "name": "submissions_deadline",
+            "type": "i64"
+          },
+          {
+            "name": "deadline",
+            "type": "i64"
+          },
+          {
+            "name": "claim_window",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrganizerProfile",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "next_bounty_id",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "PrizeClaimed",
       "type": {
         "kind": "struct",
@@ -409,6 +677,42 @@
           {
             "name": "amount",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PrizeTier",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "winner",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "claimed",
+            "type": "bool"
+          },
+          {
+            "name": "refunded",
+            "type": "bool"
+          },
+          {
+            "name": "votes",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Vote"
+                }
+              }
+            }
           }
         ]
       }
@@ -449,6 +753,22 @@
           {
             "name": "amount",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Vote",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "judge",
+            "type": "pubkey"
+          },
+          {
+            "name": "candidate",
+            "type": "pubkey"
           }
         ]
       }

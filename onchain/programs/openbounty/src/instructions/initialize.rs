@@ -1,17 +1,31 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_2022::spl_token_2022;
-use anchor_spl::token_2022::spl_token_2022::extension::{
-    BaseStateWithExtensions, ExtensionType, StateWithExtensions,
-};
-use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
+use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::constants::*;
-use crate::error::ErrorCode;
-use crate::events::BountyCreated;
+use crate::error::OpenBountyError;
+use crate::events::EscrowInitialized;
 use crate::state::{Escrow, OrganizerProfile, PrizeTier};
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct InitializeEscrowParams {
+    pub title: String,
+    pub metadata_uri: String,
+    pub judges: Vec<Pubkey>,
+    pub vote_threshold: u8,
+    // One entry per prize tier, in lamports. The vault is funded with their
+    // sum in this same instruction.
+    pub prize_amounts: Vec<u64>,
+    // Unix timestamp (seconds): entries close. At most `deadline`.
+    pub submissions_deadline: i64,
+    // Unix timestamp (seconds): voting closes.
+    pub deadline: i64,
+    // Seconds after `deadline` during which winners can still claim.
+    pub claim_window: i64,
+}
 
 #[derive(Accounts)]
 pub struct InitializeEscrow<'info> {
+    // Creates the escrow and funds the complete prize pool.
     #[account(mut)]
     pub organizer: Signer<'info>,
 
@@ -43,228 +57,194 @@ pub struct InitializeEscrow<'info> {
     )]
     pub escrow: Account<'info, Escrow>,
 
-    #[account(mint::token_program = token_program)]
-    pub mint: InterfaceAccount<'info, Mint>,
-
-    // A token account at a PDA of this program rather than an associated token
-    // account. Nobody else can create an account at this address first, so a
-    // bounty can never be blocked by someone squatting on its vault address.
-    #[account(
-        init,
-        payer = organizer,
-        seeds = [VAULT_SEED, escrow.key().as_ref()],
-        bump,
-        token::mint = mint,
-        token::authority = escrow,
-        token::token_program = token_program
-    )]
-    pub vault: InterfaceAccount<'info, TokenAccount>,
-
+    // A program-controlled, data-less system account that holds the prize
+    // pool.
     #[account(
         mut,
-        token::mint = mint,
-        token::authority = organizer,
-        token::token_program = token_program
+        seeds = [
+            VAULT_SEED,
+            organizer.key().as_ref(),
+            &organizer_profile.next_bounty_id.to_le_bytes()
+        ],
+        bump
     )]
-    pub organizer_token_account: InterfaceAccount<'info, TokenAccount>,
-
-    pub token_program: Interface<'info, TokenInterface>,
+    pub vault: SystemAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
 pub fn handle_initialize_escrow(
     ctx: Context<InitializeEscrow>,
-    title: String,
-    metadata_uri: String,
-    metadata_hash: [u8; 32],
-    judges: Vec<Pubkey>,
-    threshold: u8,
-    tier_amounts: Vec<u64>,
-    deadline: i64,
-    claim_deadline: i64,
+    params: InitializeEscrowParams,
 ) -> Result<()> {
-    require!(!title.is_empty(), ErrorCode::InvalidTitleLength);
-    require!(title.len() <= MAX_TITLE_LEN, ErrorCode::InvalidTitleLength);
-    require!(
-        metadata_uri.len() <= MAX_METADATA_URI_LEN,
-        ErrorCode::InvalidMetadataUriLength
-    );
-
-    require!(!judges.is_empty(), ErrorCode::NoJudges);
-    require!(judges.len() <= MAX_JUDGES, ErrorCode::TooManyJudges);
-
-    require!(!tier_amounts.is_empty(), ErrorCode::NoTiers);
-    require!(tier_amounts.len() <= MAX_TIERS, ErrorCode::TooManyTiers);
-
-    require!(threshold > 0, ErrorCode::InvalidThreshold);
-    require!(
-        (threshold as usize) <= judges.len(),
-        ErrorCode::InvalidThreshold
-    );
-
     let organizer = ctx.accounts.organizer.key();
-    require_organizer_not_judge(&judges, &organizer)?;
-    require_no_duplicate_judges(&judges)?;
-
     let now = Clock::get()?.unix_timestamp;
-    require!(deadline > now, ErrorCode::InvalidDeadline);
-    require_claim_window(deadline, claim_deadline)?;
 
-    let prize_total = sum_tier_amounts(&tier_amounts)?;
+    // The checks run in the same order as in the web program, so an input
+    // with several problems reports the same error in both.
+    require_valid_title_and_uri(&params)?;
+    require_valid_judges(&params.judges, &organizer)?;
+    require_majority_threshold(params.vote_threshold, params.judges.len())?;
+    let prize_pool = sum_prize_amounts(&params.prize_amounts)?;
+    let claim_deadline = check_dates_and_get_claim_deadline(&params, now)?;
 
-    require_supported_mint(&ctx.accounts.mint)?;
-
-    // This bounty takes the ID its address was derived from, and the counter
-    // moves on so the next bounty gets a new address.
-    let profile = &mut ctx.accounts.organizer_profile;
-    let bounty_id = profile.next_bounty_id;
-    profile.next_bounty_id = bounty_id
+    let bounty_id = ctx.accounts.organizer_profile.next_bounty_id;
+    let next_bounty_id = bounty_id
         .checked_add(1)
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
+        .ok_or(OpenBountyError::ArithmeticOverflow)?;
+    ctx.accounts.organizer_profile.next_bounty_id = next_bounty_id;
 
-    let mint = ctx.accounts.mint.key();
     let escrow = &mut ctx.accounts.escrow;
-    escrow.version = ESCROW_VERSION;
     escrow.organizer = organizer;
     escrow.bounty_id = bounty_id;
-    escrow.mint = mint;
-    escrow.deadline = deadline;
-    escrow.claim_deadline = claim_deadline;
-    escrow.threshold = threshold;
     escrow.bump = ctx.bumps.escrow;
     escrow.vault_bump = ctx.bumps.vault;
-    escrow.metadata_hash = metadata_hash;
-    escrow.judges = judges;
-    escrow.title = title;
-    escrow.metadata_uri = metadata_uri;
-    escrow.tiers = build_tiers(&tier_amounts);
+    escrow.vote_threshold = params.vote_threshold;
+    escrow.created_at = now;
+    escrow.submissions_deadline = params.submissions_deadline;
+    escrow.deadline = params.deadline;
+    escrow.claim_deadline = claim_deadline;
+    escrow.title = params.title;
+    escrow.metadata_uri = params.metadata_uri;
+    escrow.judges = params.judges;
+    escrow.prize_tiers = build_prize_tiers(&params.prize_amounts);
 
-    deposit_prize_pool(ctx.accounts, prize_total)?;
+    fund_vault(&ctx, prize_pool)?;
 
-    emit!(BountyCreated {
+    emit!(EscrowInitialized {
         escrow: ctx.accounts.escrow.key(),
-        bounty_id,
         organizer,
-        mint,
-        prize_total,
+        bounty_id,
+        prize_pool,
+        submissions_deadline: params.submissions_deadline,
+        deadline: params.deadline,
+        claim_deadline,
     });
-
     Ok(())
 }
 
-fn require_organizer_not_judge(judges: &[Pubkey], organizer: &Pubkey) -> Result<()> {
-    for judge in judges {
-        require!(judge != organizer, ErrorCode::OrganizerCannotJudge);
-    }
-    Ok(())
-}
-
-// A judge listed twice can still vote only once, so with a high threshold a
-// tier could never be decided.
-fn require_no_duplicate_judges(judges: &[Pubkey]) -> Result<()> {
-    for i in 0..judges.len() {
-        for j in (i + 1)..judges.len() {
-            require!(judges[i] != judges[j], ErrorCode::DuplicateJudge);
-        }
-    }
-    Ok(())
-}
-
-// Winners always get at least MIN_CLAIM_WINDOW after voting closes. A deadline
-// so large that adding the window overflows leaves no valid claim deadline,
-// so it gets the same error.
-fn require_claim_window(deadline: i64, claim_deadline: i64) -> Result<()> {
-    let earliest_claim_deadline = deadline
-        .checked_add(MIN_CLAIM_WINDOW)
-        .ok_or(ErrorCode::InvalidClaimDeadline)?;
+fn require_valid_title_and_uri(params: &InitializeEscrowParams) -> Result<()> {
     require!(
-        claim_deadline >= earliest_claim_deadline,
-        ErrorCode::InvalidClaimDeadline
+        !params.title.is_empty() && params.title.len() <= MAX_TITLE_LENGTH,
+        OpenBountyError::InvalidTitle
+    );
+    require!(
+        params.metadata_uri.len() <= MAX_METADATA_URI_LENGTH,
+        OpenBountyError::InvalidMetadataUri
     );
     Ok(())
 }
 
-// Every tier must hold a positive amount. A zero-amount tier left
-// unclaimed would make the refund total zero, and the refund would then
-// be rejected, leaving the escrow and vault rent stuck forever.
-fn sum_tier_amounts(tier_amounts: &[u64]) -> Result<u64> {
-    let mut total: u64 = 0;
-    for amount in tier_amounts {
-        require!(*amount > 0, ErrorCode::InvalidAmount);
-        total = total
-            .checked_add(*amount)
-            .ok_or(ErrorCode::ArithmeticOverflow)?;
-    }
-    Ok(total)
-}
-
-// Some Token-2022 extensions let someone other than this program move, tax or
-// block the tokens held in the vault. Classic SPL mints cannot carry
-// extensions, so only Token-2022 mints are inspected.
-fn require_supported_mint(mint: &InterfaceAccount<Mint>) -> Result<()> {
-    let mint_info = mint.to_account_info();
-    if *mint_info.owner != spl_token_2022::ID {
-        return Ok(());
-    }
-
-    let mint_data = mint_info.try_borrow_data()?;
-    let mint_state = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)?;
-    let extensions = mint_state.get_extension_types()?;
-
-    for extension in extensions {
-        // The delegate can move tokens out of the vault at any time.
-        if extension == ExtensionType::PermanentDelegate {
-            return err!(ErrorCode::UnsupportedMint);
+fn require_valid_judges(judges: &[Pubkey], organizer: &Pubkey) -> Result<()> {
+    require!(
+        !judges.is_empty() && judges.len() <= MAX_JUDGES,
+        OpenBountyError::InvalidJudgeCount
+    );
+    for i in 0..judges.len() {
+        // Only earlier entries are compared, so each pair is checked once.
+        for j in 0..i {
+            require!(judges[i] != judges[j], OpenBountyError::DuplicateJudge);
         }
-        // Rejected even at a 0% rate: the fee can be raised later, shrinking
-        // every payout, and fees withheld in the vault would stop it closing.
-        if extension == ExtensionType::TransferFeeConfig {
-            return err!(ErrorCode::UnsupportedMint);
-        }
-        // A hook program, even one set after creation, can make every transfer
-        // out of the vault fail.
-        if extension == ExtensionType::TransferHook {
-            return err!(ErrorCode::UnsupportedMint);
-        }
+        require!(
+            judges[i] != *organizer,
+            OpenBountyError::OrganizerCannotBeJudge
+        );
     }
     Ok(())
 }
 
-fn build_tiers(tier_amounts: &[u64]) -> Vec<PrizeTier> {
+// A strict majority: two disjoint groups of judges can never both reach it,
+// so a tier can never have two winners.
+fn require_majority_threshold(threshold: u8, judge_count: usize) -> Result<()> {
+    let threshold = threshold as usize;
+    require!(
+        threshold <= judge_count && threshold * 2 > judge_count,
+        OpenBountyError::InvalidVoteThreshold
+    );
+    Ok(())
+}
+
+// Checks every tier amount and returns the total prize pool.
+fn sum_prize_amounts(amounts: &[u64]) -> Result<u64> {
+    require!(
+        !amounts.is_empty() && amounts.len() <= MAX_PRIZE_TIERS,
+        OpenBountyError::InvalidPrizeTierCount
+    );
+    // A prize must also keep a brand-new winner wallet rent-exempt, so paying
+    // it can never fail.
+    let rent_exempt_minimum = Rent::get()?.minimum_balance(0);
+    let mut min_prize = MIN_PRIZE_AMOUNT;
+    if rent_exempt_minimum > min_prize {
+        min_prize = rent_exempt_minimum;
+    }
+
+    let mut prize_pool: u64 = 0;
+    for amount in amounts {
+        require!(*amount >= min_prize, OpenBountyError::InvalidPrizeAmount);
+        prize_pool = prize_pool
+            .checked_add(*amount)
+            .ok_or(OpenBountyError::PrizePoolOverflow)?;
+    }
+    Ok(prize_pool)
+}
+
+// Checks the three dates and returns the claim deadline: the deadline plus
+// the organizer's claim window.
+fn check_dates_and_get_claim_deadline(params: &InitializeEscrowParams, now: i64) -> Result<i64> {
+    let latest_deadline = now
+        .checked_add(MAX_DEADLINE_AHEAD)
+        .ok_or(OpenBountyError::ArithmeticOverflow)?;
+    require!(
+        params.deadline > now && params.deadline <= latest_deadline,
+        OpenBountyError::InvalidDeadline
+    );
+    require!(
+        params.submissions_deadline > now && params.submissions_deadline <= params.deadline,
+        OpenBountyError::InvalidSubmissionsDeadline
+    );
+    require!(
+        params.claim_window >= MIN_CLAIM_WINDOW && params.claim_window <= MAX_CLAIM_WINDOW,
+        OpenBountyError::InvalidClaimWindow
+    );
+    let claim_deadline = params
+        .deadline
+        .checked_add(params.claim_window)
+        .ok_or(OpenBountyError::ArithmeticOverflow)?;
+    Ok(claim_deadline)
+}
+
+fn build_prize_tiers(amounts: &[u64]) -> Vec<PrizeTier> {
     let mut tiers = Vec::new();
-    for amount in tier_amounts {
+    for amount in amounts {
         tiers.push(PrizeTier {
             amount: *amount,
-            claimed: false,
-            badge_minted: false,
             winner: None,
+            claimed: false,
+            refunded: false,
             votes: Vec::new(),
         });
     }
     tiers
 }
 
-// Moves the whole prize pool from the organizer into the vault, then checks
-// that the vault holds exactly that amount. The mint check above already
-// rejects tokens that take a fee on transfer; this check holds whatever the
-// mint's settings are.
-fn deposit_prize_pool(accounts: &mut InitializeEscrow, prize_total: u64) -> Result<()> {
-    let transfer_accounts = TransferChecked {
-        from: accounts.organizer_token_account.to_account_info(),
-        mint: accounts.mint.to_account_info(),
-        to: accounts.vault.to_account_info(),
-        authority: accounts.organizer.to_account_info(),
+// Moves the whole prize pool into the vault and checks that the vault
+// received exactly that much. Lamports someone sent to the vault address
+// earlier are tolerated, so nobody can block a bounty by pre-funding its
+// vault: payouts use tier amounts, and the leftover goes back to the
+// organizer when the escrow closes.
+fn fund_vault(ctx: &Context<InitializeEscrow>, prize_pool: u64) -> Result<()> {
+    let vault_before = ctx.accounts.vault.lamports();
+    let transfer_accounts = Transfer {
+        from: ctx.accounts.organizer.to_account_info(),
+        to: ctx.accounts.vault.to_account_info(),
     };
-    let transfer_context = CpiContext::new(accounts.token_program.key(), transfer_accounts);
-    token_interface::transfer_checked(transfer_context, prize_total, accounts.mint.decimals)?;
+    let transfer_context = CpiContext::new(ctx.accounts.system_program.key(), transfer_accounts);
+    transfer(transfer_context, prize_pool)?;
 
-    // The account data in memory still shows the balance from before the
-    // transfer, so it is read again from the account itself.
-    accounts.vault.reload()?;
+    let vault_after = ctx.accounts.vault.lamports();
     require!(
-        accounts.vault.amount == prize_total,
-        ErrorCode::DepositMismatch
+        vault_after.checked_sub(vault_before) == Some(prize_pool),
+        OpenBountyError::IncorrectFunding
     );
     Ok(())
 }
