@@ -1,17 +1,40 @@
-# OpenBounty
+# OpenBounty Mobile
 
-Trust-minimized on-chain escrow for bounties on Solana: any paid work,
-not only hackathons.
+Trust-minimized on-chain escrow for bounties on Solana, as an Android app.
+It covers any paid work, not only hackathons.
 
 An organizer locks the full prize pool in an on-chain vault before
-anyone starts work. Judges vote directly on-chain, each signing their own
-transaction. When a candidate reaches the vote threshold for a prize
-tier, the tier is decided automatically, and the winner claims straight
-from the vault. The organizer can reclaim only what is still unclaimed,
-and only after the claim period has ended.
+anyone starts work. Builders submit their entries on-chain. Judges vote
+directly on-chain, each signing their own transaction, and a prize is
+decided automatically once a strict majority of judges agrees. The winner
+claims straight from the vault. The organizer can reclaim only prizes that
+were never decided, or whose winner never claimed, and only after the
+matching deadline.
 
-**Deployed program ID (devnet):** `3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM`
-(v2, deployed in slot 506727070)
+**Program ID (devnet):** `3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM`
+
+> **Status: being rebuilt (October 2026).**
+>
+> - This README describes the **target design (v3)**. It follows the
+>   OpenBounty web version.
+> - Devnet still runs the **previous v2 program** (SPL-token prizes and win
+>   badges, deployed in slot 506727070) until the v3 upgrade lands. v2 and
+>   v3 are not compatible.
+> - The mobile app is not built yet.
+
+## Relation to the Web Version
+
+The OpenBounty web version
+([repository](https://github.com/secur3shell-ship-it/OpenBounty),
+[live](https://open-bounty-ten.vercel.app/)) is the benchmark for this
+project:
+
+- This program follows the web program's rules entirely, with one
+  difference: an organizer can run an **unlimited** number of bounties
+  (the web allows 256 per wallet).
+- The mobile app offers the web app's features, adapted for phones.
+- The two run on **separate programs**, so bounties made on one do not
+  appear in the other.
 
 ## The Problem
 
@@ -23,52 +46,60 @@ exists before they commit weeks of work.
 ## How It Works
 
 1. **Lock.** The organizer creates a bounty with:
-   - up to 4 prize tiers
-   - up to 5 judges and a vote threshold
-   - a voting deadline, and a claim deadline at least 7 days after it
+   - up to 4 prize tiers in SOL
+   - up to 5 judges
+   - three dates: when entries close, when judging ends, and a claim
+     window of 1 to 90 days after judging
 
    The full prize pool moves into a program-controlled vault in the same
-   transaction. Prizes are SPL tokens (classic SPL Token or Token-2022),
-   so native SOL works as wrapped SOL. Every bounty gets a new ID from
-   the organizer's own counter, so a bounty's address is never reused.
-2. **Vote.** Each judge signs their own `cast_vote` transaction naming a
-   candidate for a tier. The vote that brings a candidate to the
-   threshold decides the tier in the same transaction. Votes cannot be
-   changed.
-3. **Claim.** The tier's winner claims straight from the vault, at any
-   time until the claim deadline. There is no approval step and no
-   organizer involvement. If the winner has no token account yet, the
-   claim creates one.
-4. **Badge (optional).** The winner can mint a Metaplex Core "winner"
-   badge as on-chain proof of the win. There is one per tier, and it
-   cannot be edited.
-5. **Refund.** After the claim deadline, the organizer can reclaim
-   whatever was never claimed. The bounty's accounts then close, and
-   their rent returns to the organizer.
+   transaction. Every bounty gets a new ID from the organizer's own
+   counter, so a bounty's address is never reused.
+2. **Enter.** Until entries close, any wallet except the organizer and the
+   judges can submit one entry: a project name, a link and a short
+   description.
+3. **Judge.** Until judging ends, each judge signs their own
+   `vote_winner` transaction naming a wallet for a prize tier. Votes are
+   final. The vote that gives a candidate a strict majority of the judges
+   decides the tier in the same transaction. In the app, judges can also
+   keep private scorecards for each entry on their own phone.
+4. **Claim.** The tier's winner claims straight from the vault, from the
+   moment the tier is decided until the claim window ends. There is no
+   approval step and no organizer involvement.
+5. **Refund.** The organizer reclaims each prize separately:
+   - a prize that never got a winner, after judging ends
+   - a winner's unclaimed prize, after the claim window ends
+
+   When every prize is claimed or refunded, the bounty account closes and
+   its rent returns to the organizer.
+6. **Close entry.** After judging ends, a builder can close their entry
+   and get its rent back.
 
 No role is stored as a flag anywhere. Organizer, judge and winner are
-derived per bounty at the moment of each call. The program emits events
-for each of these steps, to drive notifications.
+derived per bounty at the moment of each call. The program emits an event
+for every state change.
 
 ## Trust Assumptions
 
-**What the program guarantees**, for the code as deployed:
+**What the program guarantees** (v3, once deployed):
 
-- The prize pool is fully deposited before the bounty exists. Creation
-  fails unless the vault receives exactly the prize total.
-- The organizer cannot withdraw early. Prize tokens reach the organizer
-  only by a refund, and only after the claim deadline.
-- A decided prize stays claimable for at least 7 days after voting
-  closes.
-- Only the listed judges decide winners. The organizer cannot be a judge,
-  a judge cannot be listed twice, and each judge votes at most once per
+- **The prize pool is fully deposited before the bounty exists.**
+  Creation fails unless the vault receives exactly the prize total.
+- **The organizer cannot withdraw early.** Funds reach the organizer only
+  by a refund:
+  - an undecided prize, after judging ends
+  - a decided prize, only after its claim window ends
+- **The organizer cannot block a claim,** even by handing their wallet to
+  another program.
+- **Only the listed judges decide winners, by a strict majority.** So two
+  winners for one prize are impossible. The organizer cannot be a judge,
+  and a judge cannot be listed twice. Each judge votes at most once per
   tier.
-- Only a tier's winner can claim it or mint its badge, and only once.
-- A transaction built for one bounty can never affect another. Bounty
-  addresses are never reused.
-- Tokens whose issuer could take funds from the vault, or skim or block
-  transfers from it, are rejected. These are Token-2022 mints with a
-  permanent delegate, a transfer fee or a transfer hook.
+- **Conflicts of interest are blocked.** A winner can never be the
+  organizer or a judge. Neither the organizer nor a judge can submit an
+  entry.
+- **Only a tier's winner can claim it, and only once.**
+- **Bounty addresses are never reused,** so a transaction built for one
+  bounty can never affect another.
 
 **What it does not guarantee:**
 
@@ -76,20 +107,13 @@ for each of these steps, to drive notifications.
   wallet, `CCsJcqHJRLELykJ1GCTWvihUGFkFaP1eRws1MUAE6Ev6`, which could
   deploy new code, including code that moves escrowed funds. Moving it to
   a Squads multisig is planned but **not done yet**.
-- **Token issuers can still freeze or pause.** A mint's freeze authority,
-  or a Token-2022 pause authority, can freeze the vault or a winner's
-  account. An organizer who controls that authority could block claims
-  until the claim deadline and then refund. Clients must show only
-  bounties in allowlisted tokens, such as SOL and USDC.
 - **Judge independence.** The organizer chooses the judges. The program
-  guarantees that the listed judges decide, not that they are
-  independent. Judges can name any wallet as a winner, including the
-  organizer's.
-- **Multisig judges are unverified.** A judge may be a multisig vault,
-  for example Squads, because a vote needs only a signature. This is
-  expected to work but has **not yet been verified on devnet**.
-- **Badges depend on Metaplex.** Badges use the Metaplex Core program,
-  which Metaplex can upgrade. Prize funds never pass through it.
+  guarantees that a majority of the listed judges decides, not that the
+  judges are independent.
+- **Bounty details are untrusted.** The longer description is a JSON file
+  the organizer hosts, linked from the bounty. It can change at any time
+  and is shown as plain text. The on-chain title, judges and prizes are
+  what count.
 
 ## Repository Layout
 
@@ -97,28 +121,23 @@ This is a single repository with two independent modules. They share no
 code and no build tooling.
 
 ```
-OpenBounty/
+OpenBountyMobile/
 ├── onchain/     Anchor / Rust program (Solana devnet), the source of truth
-├── offchain/    Flutter mobile app, the client
-└── assets/      Static badge metadata and image, served from this repo
+├── offchain/    React Native (Expo) Android app (not created yet)
+└── assets/      v2 win-badge metadata; removed after the v3 upgrade
 ```
 
 The only coupling between the two modules is the deployed **program ID**
-and the generated **IDL**, both produced by the onchain build. The
-detailed client integration guide, the implementation record and the IDL
-are shared with the client developer directly; they are not stored in
-this repository.
-
-`assets/badge.json` and `assets/badge.png` are referenced by the deployed
-program through a fixed URL on the `master` branch. Do not move or rename
-them.
+and the **IDL**. Every `anchor build` writes the IDL to
+`onchain/idl/openbounty.json`, which is committed (from v3 on). The app
+generates its typed client from that file.
 
 ## Stack
 
 | Module | Stack |
 |---|---|
-| onchain | Anchor, Rust, `anchor-spl` (SPL Token and Token-2022), Metaplex Core (`mpl-core`), Solana devnet |
-| offchain | Flutter, Dart, `coral_xyz` (Anchor client), Mobile Wallet Adapter |
+| onchain | Anchor, Rust, Solana devnet |
+| offchain | Expo (React Native, TypeScript), expo-router, `@solana/kit` with a Codama-generated client, Mobile Wallet Adapter. Prices come from CoinGecko and news from Solana RSS; there is no backend. |
 
 ## Toolchain
 
@@ -127,13 +146,14 @@ Built and tested against:
 | Tool | Version |
 |---|---|
 | Anchor CLI | 1.1.2 |
-| `anchor-lang` / `anchor-spl` crates | 1.2.0 |
-| `mpl-core` crate | 0.12.1 |
+| `anchor-lang` crate | 1.2.0 |
 | Solana CLI | 3.1.10 |
 | Surfpool | 1.5.0 |
 | Rust | 1.89.0 (pinned in `onchain/rust-toolchain.toml`) |
 | Node.js | 24.21.0 |
-| Yarn | 1.22.22 |
+| Yarn (onchain) | 1.22.22 |
+
+The app's Expo SDK version is pinned when the app is scaffolded.
 
 Anchor 1.x is a major release with breaking changes relative to 0.3x.
 Notably, the TypeScript package was renamed to `@anchor-lang/core`, and
@@ -153,38 +173,33 @@ Solana CLI is needed for `solana program` and `solana-keygen` commands.
 ```bash
 cd onchain
 anchor build
-anchor test        # local Surfpool only; about 1 minute
+anchor test        # local Surfpool only
 ```
 
 **Tests never run against devnet by accident.** `Anchor.toml` keeps the
 provider on `localnet`, and the test suite refuses any non-local RPC
 endpoint. The one exception is a devnet smoke test, which runs only when
-`OPENBOUNTY_DEVNET=1` is set on purpose.
+`OPENBOUNTY_DEVNET=1` is set on purpose. Tests cross deadlines with
+Surfpool's time-travel cheatcode instead of waiting.
 
-The Metaplex Core program is loaded into local tests from
-`onchain/tests/fixtures/mpl_core.so` through `[[test.genesis]]` in
-`Anchor.toml`, because `anchor test` runs Surfpool offline.
-
-Upgrading devnet. The provider stays on `localnet`; the cluster is chosen
-on the command line:
+**Upgrading devnet.** The provider stays on `localnet`, and the cluster
+is chosen on the command line:
 
 ```bash
 cd onchain
 anchor build
 solana program show 3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM --url devnet   # current data length
+# only if the new .so is larger than the current data length:
 solana program extend 3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM <extra bytes> --url devnet
 anchor deploy --provider.cluster devnet --no-idl -- --no-auto-extend
 anchor idl upgrade --filepath target/idl/openbounty.json \
   3xbu7yrMBpbhtzb5FqJgTydvEtPHBKWoQAQ5Vaw5nMCM --provider.cluster devnet
 ```
 
-- Extend only by the difference between the new `.so` size and the
-  current data length.
 - `--no-auto-extend` makes the deploy fail rather than spend more SOL
   without warning.
-- The upgrade needs a temporary upload buffer worth the full program's
-  rent, about 2.1 devnet SOL for the current 410 KB program. It is
-  refunded when the upgrade completes.
+- The upgrade needs a temporary upload buffer worth the new program's
+  rent. It is refunded when the upgrade completes.
 - Anchor 1.1.2 warns that `anchor deploy` is deprecated in favour of
   `anchor program deploy`. The command above is the one that was used.
 
@@ -198,15 +213,35 @@ ANCHOR_WALLET=$HOME/.config/solana/id.json \
 yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/openbounty.ts --grep "devnet smoke"
 ```
 
-## Offchain — Run the Mobile App
+## Offchain: Run the Mobile App
 
-Prerequisites: Flutter SDK, an Android device or emulator, and an
-MWA-compatible wallet app (Phantom or Solflare) installed and set to
-devnet.
+Prerequisites:
+- Node.js
+- JDK 17 and the Android SDK
+- an Android device or emulator, with Phantom or Solflare installed and
+  set to devnet
+
+The app uses Mobile Wallet Adapter, so it needs an Expo **development
+build**; Expo Go does not work.
 
 ```bash
-# TODO: fill in once the Flutter app is scaffolded
+# TODO: filled in when the app is scaffolded
 ```
+
+iOS is planned for later. It needs a different wallet connection, because
+Mobile Wallet Adapter is Android-only.
+
+## Roadmap
+
+| Step | Status |
+|---|---|
+| v3 program, matching the web program, with unlimited bounties | planned |
+| v3 upgrade on devnet | planned |
+| Android app: Explore, bounty page (prizes, entries, judging), create, your bounties, markets | planned |
+| End-to-end devnet run and release APK | planned |
+| Upgrade authority moved to a Squads multisig | parked |
+| iOS wallet support | parked |
+| Token prizes, past bounties, claim in any token (web roadmap) | later |
 
 ## Demo
 
