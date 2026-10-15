@@ -8,6 +8,62 @@
   },
   "instructions": [
     {
+      "name": "close_entry",
+      "discriminator": [
+        132,
+        26,
+        202,
+        145,
+        190,
+        37,
+        114,
+        67
+      ],
+      "accounts": [
+        {
+          "name": "submitter",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "submission"
+          ]
+        },
+        {
+          "name": "submission",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  117,
+                  98,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "submission.escrow",
+                "account": "Submission"
+              },
+              {
+                "kind": "account",
+                "path": "submitter"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "initialize_escrow",
       "discriminator": [
         243,
@@ -121,6 +177,103 @@
           }
         }
       ]
+    },
+    {
+      "name": "submit_entry",
+      "discriminator": [
+        150,
+        212,
+        114,
+        178,
+        207,
+        212,
+        216,
+        222
+      ],
+      "accounts": [
+        {
+          "name": "submitter",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "escrow",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow.organizer",
+                "account": "Escrow"
+              },
+              {
+                "kind": "account",
+                "path": "escrow.bounty_id",
+                "account": "Escrow"
+              }
+            ]
+          }
+        },
+        {
+          "name": "submission",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  117,
+                  98,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "escrow"
+              },
+              {
+                "kind": "account",
+                "path": "submitter"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "title",
+          "type": "string"
+        },
+        {
+          "name": "url",
+          "type": "string"
+        },
+        {
+          "name": "description",
+          "type": "string"
+        }
+      ]
     }
   ],
   "accounts": [
@@ -148,6 +301,19 @@
         218,
         209,
         79
+      ]
+    },
+    {
+      "name": "Submission",
+      "discriminator": [
+        58,
+        194,
+        159,
+        158,
+        75,
+        102,
+        178,
+        197
       ]
     }
   ],
@@ -713,6 +879,46 @@
                 }
               }
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Submission",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "submitter",
+            "type": "pubkey"
+          },
+          {
+            "name": "submitted_at",
+            "type": "i64"
+          },
+          {
+            "name": "close_after",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "title",
+            "type": "string"
+          },
+          {
+            "name": "url",
+            "type": "string"
+          },
+          {
+            "name": "description",
+            "type": "string"
           }
         ]
       }

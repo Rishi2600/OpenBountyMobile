@@ -891,3 +891,256 @@ describeLocal("initialize_escrow", () => {
     expect(escrow.prizeTiers.length).to.equal(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// submit_entry and close_entry
+// ---------------------------------------------------------------------------
+
+const SUBMISSION_SIZE = 531;
+
+// Funding for a builder whose entry is expected to fail. Anchor creates the
+// entry account before the handler's checks run, so the wallet needs its
+// rent (about 0.0046 SOL) plus fees.
+const ENTRY_RENT_AND_FEES = 6_000_000;
+
+const BUILDER_LAMPORTS = web3.LAMPORTS_PER_SOL / 10;
+
+type EntryFields = {
+  title: string;
+  url: string;
+  description: string;
+};
+
+const DEFAULT_ENTRY: EntryFields = {
+  title: "My project",
+  url: "https://example.com/project",
+  description: "What it does and how it was built.",
+};
+
+async function submitEntry(
+  builder: web3.Keypair,
+  escrow: web3.PublicKey,
+  fields: EntryFields
+): Promise<string> {
+  const [submission] = submissionPda(escrow, builder.publicKey);
+  return programFor(builder)
+    .methods.submitEntry(fields.title, fields.url, fields.description)
+    .accountsPartial({
+      submitter: builder.publicKey,
+      escrow,
+      submission,
+    })
+    .rpc();
+}
+
+async function closeEntry(
+  builder: web3.Keypair,
+  submission: web3.PublicKey
+): Promise<string> {
+  return programFor(builder)
+    .methods.closeEntry()
+    .accountsPartial({
+      submitter: builder.publicKey,
+      submission,
+    })
+    .rpc();
+}
+
+describeLocal("submit_entry and close_entry", () => {
+  let organizer: web3.Keypair;
+  let judges: web3.Keypair[];
+  let bounty: Bounty;
+  let builder: web3.Keypair;
+
+  before(async () => {
+    organizer = await newFundedWallet(ORGANIZER_LAMPORTS);
+    judges = [];
+    for (let i = 0; i < 3; i++) {
+      judges.push(await newFundedWallet(ENTRY_RENT_AND_FEES));
+    }
+    const judgeKeys: web3.PublicKey[] = [];
+    for (const judge of judges) {
+      judgeKeys.push(judge.publicKey);
+    }
+    bounty = await createBounty(organizer, { judges: judgeKeys });
+    builder = await newFundedWallet(BUILDER_LAMPORTS);
+  });
+
+  it("records an entry, paid for by the builder", async () => {
+    const before = await lamportsOf(builder.publicKey);
+    const timeBefore = await chainNow();
+    const signature = await submitEntry(builder, bounty.escrow, DEFAULT_ENTRY);
+    const timeAfter = await chainNow();
+
+    const [address, bump] = submissionPda(bounty.escrow, builder.publicKey);
+    const entry = await program.account.submission.fetch(address);
+    expect(entry.escrow.toBase58()).to.equal(bounty.escrow.toBase58());
+    expect(entry.submitter.toBase58()).to.equal(builder.publicKey.toBase58());
+    expect(entry.submittedAt.toNumber()).to.be.at.least(timeBefore);
+    expect(entry.submittedAt.toNumber()).to.be.at.most(timeAfter);
+    expect(entry.closeAfter.toNumber()).to.equal(bounty.params.deadline);
+    expect(entry.bump).to.equal(bump);
+    expect(entry.title).to.equal(DEFAULT_ENTRY.title);
+    expect(entry.url).to.equal(DEFAULT_ENTRY.url);
+    expect(entry.description).to.equal(DEFAULT_ENTRY.description);
+
+    const info = await connection.getAccountInfo(address);
+    expect(info?.data.length).to.equal(SUBMISSION_SIZE);
+    const rent = await connection.getMinimumBalanceForRentExemption(
+      SUBMISSION_SIZE
+    );
+    const fee = await txFee(signature);
+    const after = await lamportsOf(builder.publicKey);
+    expect(before - after).to.equal(rent + fee);
+  });
+
+  it("lists one bounty's entries with a single memcmp filter", async () => {
+    const otherBuilder = await newFundedWallet(BUILDER_LAMPORTS);
+    await submitEntry(otherBuilder, bounty.escrow, DEFAULT_ENTRY);
+
+    // An entry on another bounty must not show up.
+    const judgeKeys: web3.PublicKey[] = [];
+    for (const judge of judges) {
+      judgeKeys.push(judge.publicKey);
+    }
+    const otherBounty = await createBounty(organizer, { judges: judgeKeys });
+    await submitEntry(builder, otherBounty.escrow, DEFAULT_ENTRY);
+
+    const found = await connection.getProgramAccounts(program.programId, {
+      commitment: "confirmed",
+      filters: [
+        { dataSize: SUBMISSION_SIZE },
+        { memcmp: { offset: 8, bytes: bounty.escrow.toBase58() } },
+      ],
+    });
+    const addresses: string[] = [];
+    for (const account of found) {
+      addresses.push(account.pubkey.toBase58());
+    }
+    addresses.sort();
+    const expected = [
+      submissionPda(bounty.escrow, builder.publicKey)[0].toBase58(),
+      submissionPda(bounty.escrow, otherBuilder.publicKey)[0].toBase58(),
+    ];
+    expected.sort();
+    expect(addresses).to.deep.equal(expected);
+  });
+
+  it("allows one entry per wallet per bounty", async () => {
+    const [address] = submissionPda(bounty.escrow, builder.publicKey);
+    const before = await program.account.submission.fetch(address);
+    await expectFailureMentioning(
+      submitEntry(builder, bounty.escrow, {
+        title: "Second try",
+        url: "https://example.com/other",
+        description: "",
+      }),
+      "already in use"
+    );
+    const after = await program.account.submission.fetch(address);
+    expect(after.title).to.equal(before.title);
+  });
+
+  it("rejects the organizer and the judges", async () => {
+    await expectError(
+      submitEntry(organizer, bounty.escrow, DEFAULT_ENTRY),
+      "OrganizerCannotSubmit"
+    );
+    await expectError(
+      submitEntry(judges[1], bounty.escrow, DEFAULT_ENTRY),
+      "JudgeCannotSubmit"
+    );
+    const [organizerEntry] = submissionPda(bounty.escrow, organizer.publicKey);
+    const [judgeEntry] = submissionPda(bounty.escrow, judges[1].publicKey);
+    expect(await connection.getAccountInfo(organizerEntry)).to.equal(null);
+    expect(await connection.getAccountInfo(judgeEntry)).to.equal(null);
+  });
+
+  it("checks the entry fields", async () => {
+    // The longest name, link and description are accepted.
+    const longest = await newFundedWallet(BUILDER_LAMPORTS);
+    const fields: EntryFields = {
+      title: "t".repeat(50),
+      url: "u".repeat(100),
+      description: "d".repeat(280),
+    };
+    await submitEntry(longest, bounty.escrow, fields);
+    const [address] = submissionPda(bounty.escrow, longest.publicKey);
+    const entry = await program.account.submission.fetch(address);
+    expect(entry.title).to.equal(fields.title);
+    expect(entry.url).to.equal(fields.url);
+    expect(entry.description).to.equal(fields.description);
+
+    // An empty description is accepted too.
+    const brief = await newFundedWallet(BUILDER_LAMPORTS);
+    await submitEntry(brief, bounty.escrow, {
+      title: "Brief",
+      url: "https://example.com",
+      description: "",
+    });
+
+    const rejected = await newFundedWallet(ENTRY_RENT_AND_FEES);
+    const cases: [EntryFields, string][] = [
+      [{ ...DEFAULT_ENTRY, title: "" }, "InvalidEntryTitle"],
+      [{ ...DEFAULT_ENTRY, title: "t".repeat(51) }, "InvalidEntryTitle"],
+      [{ ...DEFAULT_ENTRY, url: "" }, "InvalidEntryUrl"],
+      [{ ...DEFAULT_ENTRY, url: "u".repeat(101) }, "InvalidEntryUrl"],
+      [
+        { ...DEFAULT_ENTRY, description: "d".repeat(281) },
+        "InvalidEntryDescription",
+      ],
+    ];
+    for (const [badFields, code] of cases) {
+      await expectError(submitEntry(rejected, bounty.escrow, badFields), code);
+    }
+    const [rejectedEntry] = submissionPda(bounty.escrow, rejected.publicKey);
+    expect(await connection.getAccountInfo(rejectedEntry)).to.equal(null);
+  });
+
+  it("can't be closed before the deadline", async () => {
+    const [address] = submissionPda(bounty.escrow, builder.publicKey);
+    await expectError(closeEntry(builder, address), "EntryLocked");
+    expect(await connection.getAccountInfo(address)).to.not.equal(null);
+  });
+
+  it("rejects entries once entries close, while judging goes on", async () => {
+    await advanceClockPast(bounty.params.submissionsDeadline);
+    expect(await chainNow()).to.be.at.most(bounty.params.deadline);
+
+    const late = await newFundedWallet(ENTRY_RENT_AND_FEES);
+    await expectError(
+      submitEntry(late, bounty.escrow, DEFAULT_ENTRY),
+      "SubmissionsClosed"
+    );
+    const [address] = submissionPda(bounty.escrow, late.publicKey);
+    expect(await connection.getAccountInfo(address)).to.equal(null);
+
+    // Still locked: judging has not ended.
+    const [builderEntry] = submissionPda(bounty.escrow, builder.publicKey);
+    await expectError(closeEntry(builder, builderEntry), "EntryLocked");
+  });
+
+  it("lets only the builder close their entry", async () => {
+    await advanceClockPast(bounty.params.deadline);
+    const [address] = submissionPda(bounty.escrow, builder.publicKey);
+    const stranger = await newFundedWallet(FEE_LAMPORTS);
+
+    // The entry's address is derived from its builder, so another signer
+    // points at an address that does not hold this entry.
+    await expectError(closeEntry(stranger, address), "ConstraintSeeds");
+    expect(await connection.getAccountInfo(address)).to.not.equal(null);
+  });
+
+  it("returns the rent to the builder after the deadline", async () => {
+    const [address] = submissionPda(bounty.escrow, builder.publicKey);
+    const rent = await lamportsOf(address);
+    const before = await lamportsOf(builder.publicKey);
+
+    const signature = await closeEntry(builder, address);
+
+    expect(await connection.getAccountInfo(address)).to.equal(null);
+    const fee = await txFee(signature);
+    const after = await lamportsOf(builder.publicKey);
+    expect(after - before).to.equal(rent - fee);
+  });
+});

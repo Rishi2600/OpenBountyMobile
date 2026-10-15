@@ -26,4 +26,19 @@ pub mod openbounty {
     ) -> Result<()> {
         instructions::initialize::handle_initialize_escrow(ctx, params)
     }
+
+    // A builder enters a bounty before its entries close.
+    pub fn submit_entry(
+        ctx: Context<SubmitEntry>,
+        title: String,
+        url: String,
+        description: String,
+    ) -> Result<()> {
+        instructions::submit_entry::handle_submit_entry(ctx, title, url, description)
+    }
+
+    // After the deadline, a builder closes their entry and gets its rent back.
+    pub fn close_entry(ctx: Context<CloseEntry>) -> Result<()> {
+        instructions::close_entry::handle_close_entry(ctx)
+    }
 }

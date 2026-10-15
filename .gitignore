@@ -36,6 +36,9 @@ offchain/ios/Runner/GeneratedPluginRegistrant.*
 # ---------- handoff documents (shared directly, not repo content) ----------
 handoff/
 
+# ---------- devlog (plan and per-checkpoint log, kept local) ----------
+docs/DEVLOG.md
+
 # ---------- secrets / keys ----------
 .env
 **/.env
